@@ -1,13 +1,8 @@
 <p align="center">
-  <pre>
-███████╗███╗   ███╗██╗   ██╗██╗   ██╗
-██╔════╝████╗ ████║██║   ██║╚██╗ ██╔╝
-█████╗  ██╔████╔██║██║   ██║ ╚████╔╝ 
-██╔══╝  ██║╚██╔╝██║╚██╗ ██╔╝  ╚██╔╝  
-███████╗██║ ╚═╝ ██║ ╚████╔╝    ██║   
-╚══════╝╚═╝     ╚═╝  ╚═══╝     ╚═╝    
-        C  O  N  T  R  O  L  L  E  R
-  </pre>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/logo-dark.png">
+    <img src="docs/logo-light.png" alt="EMVy Controller" width="280">
+  </picture>
 </p>
 
 <p align="center">
@@ -27,6 +22,12 @@
   <strong>English</strong> ·
   <a href="README.es.md">Español</a> ·
   <a href="README.pt.md">Português</a>
+</p>
+
+<p align="center">
+  <a href="https://buymeacoffee.com/glitchboi">
+    <img src="https://img.shields.io/badge/%E2%98%95%20Buy%20Me%20a%20Coffee-Support%20the%20project-FFDD00?style=for-the-badge&logo=buymeacoffee&logoColor=black" alt="Buy Me a Coffee" height="42" />
+  </a>
 </p>
 
 ---
