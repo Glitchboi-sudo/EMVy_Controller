@@ -82,6 +82,7 @@ def test_write_screen_has_gp_section_and_runs(xdg):
     seguro corre contra una tarjeta GP falsa y su salida va al log compartido."""
     import asyncio
 
+    pytest.importorskip("Crypto", reason="requiere el extra [gp] (pycryptodome)")
     from fakegpcard import FakeGPCard
     from emvy.core.gp.keyset import DEFAULT_GP_KEY, Keyset
     from emvy.core.hexutil import from_hex

@@ -1,6 +1,10 @@
 """GlobalPlatform: keysets, cripto SCP02/SCP03. La cripto se ancla a vectores
 conocidos (AES-CMAC de RFC 4493) y a propiedades estructurales; la validación
 end-to-end del canal es contra la tarjeta real (JCOP)."""
+import pytest
+
+pytest.importorskip("Crypto", reason="requiere el extra [gp] (pycryptodome)")
+
 from emvy.core.gp import crypto
 from emvy.core.gp.keyset import DEFAULT_GP_KEY, Keyset
 from emvy.core.hexutil import from_hex, to_hex
