@@ -85,3 +85,58 @@ def test_get_data_sweep():
     send, _ = build_fake_card()
     data = emv.get_data_sweep(send, tags=[0x9F36, 0x9F17])
     assert data.get("9F36") == from_hex("9F36020005") and "9F17" not in data
+
+
+_SWIPE = "%B4111111111111111^DOE/JOHN^2505101?;4111111111111111=25051010000000000?"
+
+
+def test_swipe_to_dump_decodes_tracks():
+    from emvy.session.capture import swipe_to_dump
+    dump = swipe_to_dump(_SWIPE, reader="MSR")
+    app = dump.applications[0]
+    assert app["aid"] == "MAGSTRIPE"
+    ch = app["cardholder"]
+    assert ch["PAN"] == "4111111111111111"
+    assert ch["Nombre"] == "DOE/JOHN"
+    assert ch["Caducidad (YYMM)"] == "2505"
+    assert ch["Código de servicio"] == "101"
+    assert "Track 2" in ch
+    assert any(b["source"] == "hid-read" for b in dump.blobs)  # buscable/guardable
+
+
+def test_swipe_to_dump_plain_number_is_magstripe():
+    from emvy.session.capture import swipe_to_dump
+    # banda sin centinelas (tarjeta de acceso/regalo: solo un número) → MAGSTRIPE
+    dump = swipe_to_dump("2202081151", reader="MSR")
+    app = dump.applications[0]
+    assert app["aid"] == "MAGSTRIPE"
+    assert app["cardholder"]["Datos"] == "2202081151"
+    assert app["cardholder"]["Hex"] == "8341177F"            # 2202081151 == 0x8341177F
+    assert app["cardholder"]["Hex (LSB primero)"] == "7F174183"
+
+
+def test_swipe_to_dump_empty_read():
+    from emvy.session.capture import swipe_to_dump
+    assert swipe_to_dump("", reader="MSR").applications == []  # timeout → sin apps
+
+
+def test_hid_idle_return_nfc_vs_swipe():
+    from emvy.readers.msr import _swipe_done
+    # NFC (token plano, sin centinelas): cierra rápido por inactividad
+    assert _swipe_done("0461339765", 0.30) is True
+    assert _swipe_done("0461339765", 0.10) is False
+    # swipe (con centinelas): NO se corta por un hueco corto entre pistas…
+    assert _swipe_done("%B4111111111111111^DOE/JOHN^2505101?;", 0.30) is False
+    # …pero sí cede tras el idle largo de reserva (por si faltara el ENTER)
+    assert _swipe_done("%B4111111111111111^DOE/JOHN^2505101?;", 1.20) is True
+    assert _swipe_done("", 5.0) is False  # nada leído aún
+
+
+def test_capture_reader_routes_swipe_when_no_transceive():
+    from emvy.readers.types import Capability, DeviceInfo, OpenReader
+    from emvy.session.capture import capture_reader
+    dev = DeviceInfo("msr", "evdev:/x", "MSR", frozenset({Capability.MAGSTRIPE}))
+    r = OpenReader(device=dev, close=lambda: None, read_swipe=lambda t=30.0: _SWIPE)
+    dump = capture_reader(r)  # sin transceive → ruta de banda
+    assert dump.applications[0]["aid"] == "MAGSTRIPE"
+    assert dump.applications[0]["cardholder"]["PAN"] == "4111111111111111"

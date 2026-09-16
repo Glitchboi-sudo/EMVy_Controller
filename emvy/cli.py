@@ -683,6 +683,130 @@ def _require_project():
     return proj
 
 
+def cmd_gp_keyset(args) -> int:
+    """Gestiona los keysets de GlobalPlatform (claves del Secure Channel) del
+    proyecto activo: las claves ENC/MAC/KEK que autentican el canal seguro para
+    escribir/gestionar contenido en una JavaCard."""
+    from .core.gp.keyset import Keyset
+    proj = _require_project()
+    action = args.action
+
+    if action == "add":
+        try:
+            if args.same:
+                ks = Keyset.same_key(args.name, key=args.same, kvn=args.kvn,
+                                     scp=args.scp, description=args.desc or "")
+            else:
+                if not (args.enc and args.mac and args.kek):
+                    print(c("Da --enc/--mac/--kek, o --same <clave> para las tres.", "red"))
+                    return 1
+                ks = Keyset(name=args.name, enc=args.enc, mac=args.mac, kek=args.kek,
+                            kvn=args.kvn, scp=args.scp, description=args.desc or "")
+        except ValueError as e:
+            print(c(f"Keyset inválido: {e}", "red")); return 1
+        store.add_keyset(proj, ks)
+        print(c(f"Keyset {ks.name!r} guardado en {proj.name} "
+                f"(kvn={ks.kvn}, scp={ks.scp}).", "green"))
+        return 0
+
+    if action == "list":
+        keysets = store.load_keysets(proj)
+        if not keysets:
+            print(c("(sin keysets; añade con 'gp keyset add')", "grey")); return 0
+        print(c("Keysets de GlobalPlatform:", "bold"))
+        for k in keysets:
+            m = k.masked()
+            print(f"  {c(k.name, 'cyan'):<20} kvn={k.kvn} scp={k.scp}  "
+                  f"enc={m['enc']} mac={m['mac']} kek={m['kek']}  {c(k.description, 'grey')}")
+        return 0
+
+    if action == "show":
+        k = store.get_keyset(proj, args.name)
+        if not k:
+            print(c(f"No existe el keyset {args.name!r}.", "red")); return 1
+        v = k.to_dict() if args.reveal else k.masked()
+        for field in ("name", "kvn", "scp", "enc", "mac", "kek", "description"):
+            print(f"  {c(field, 'green'):<14} {v[field]}")
+        if not args.reveal:
+            print(c("  (usa --reveal para ver las claves completas)", "grey"))
+        return 0
+
+    if action == "rm":
+        if not store.get_keyset(proj, args.name):
+            print(c(f"No existe el keyset {args.name!r}.", "red")); return 1
+        store.remove_keyset(proj, args.name)
+        print(c(f"Keyset {args.name!r} borrado.", "green"))
+        return 0
+    return 1
+
+
+def cmd_gp_op(args) -> int:
+    """Operaciones de GlobalPlatform contra la tarjeta: abre el canal seguro con
+    un keyset del proyecto y ejecuta auth/status/install/delete/store-data."""
+    from .core.gp import apdu as gpapdu
+    from .core.gp import cap as capmod
+    from .core.gp import content
+    from .core.gp.scp import GPError, SEC_CENC, SEC_CMAC
+    proj = _require_project()
+    ks = store.get_keyset(proj, args.keyset)
+    if not ks:
+        print(c(f"No existe el keyset {args.keyset!r}. Añádelo con 'gp keyset add'.", "red"))
+        return 1
+    level = SEC_CENC if getattr(args, "enc", False) else SEC_CMAC
+    try:
+        with open_reader(args) as r:
+            if r.transceive is None:
+                print(c("El lector conectado no soporta APDUs (no es de chip/NFC).", "red"))
+                return 1
+            chan = content.authenticate(r.transceive, ks, security_level=level)
+            print(c(f"Canal seguro abierto: SCP{chan.protocol}, keyset {ks.name} "
+                    f"(nivel {'C-ENC+C-MAC' if level == SEC_CENC else 'C-MAC'}).", "green"))
+
+            if args.gpcmd == "auth":
+                return 0
+            if args.gpcmd == "status":
+                inv = content.list_all(chan)
+                for key, label in (("isd", "ISD"), ("apps", "Aplicaciones / SD"),
+                                   ("load_files", "Paquetes (load files)")):
+                    print(c(f"── {label} ──", "bold", "cyan"))
+                    if not inv[key]:
+                        print(c("  (ninguno)", "grey"))
+                    for a in inv[key]:
+                        print(f"  {c(a.aid, 'green'):<34} {a.lifecycle:<12} {c(a.privileges, 'grey')}")
+                return 0
+            if args.gpcmd == "delete":
+                content.delete(chan, from_hex(args.aid), related=not args.no_related)
+                print(c(f"DELETE {args.aid} OK.", "green"))
+                return 0
+            if args.gpcmd == "store-data":
+                resp = chan.send(gpapdu.store_data(from_hex(args.hex)))
+                if not resp.ok:
+                    print(c(f"STORE DATA: {resp.sw_hex} ({resp.sw_str()})", "red")); return 1
+                print(c("STORE DATA OK.", "green")); return 0
+            if args.gpcmd == "install":
+                capf = capmod.parse_cap(args.cap)
+                print(c(f"CAP: paquete {capf.package_aid_hex}, applets "
+                        f"{[to_hex(a) for a in capf.applet_aids]}", "grey"))
+                res = content.install_cap(
+                    chan, capf,
+                    instance_aid=from_hex(args.instance) if args.instance else None,
+                    module_aid=from_hex(args.module) if args.module else None,
+                    privileges=from_hex(args.priv) if args.priv else b"\x00",
+                    params=from_hex(args.params) if args.params else b"",
+                    make_selectable=not args.load_only, force=args.force)
+                for step, sw in res.steps:
+                    print(f"  {c(step, 'cyan'):<22} {sw}")
+                print(c(f"Instalado: paquete {res.package_aid}"
+                        + (f", instancia {res.instance_aid}" if res.instance_aid else "")
+                        + f" ({res.load_blocks} bloques).", "green"))
+                return 0
+    except GPError as e:
+        print(c(f"GlobalPlatform: {e}", "red")); return 1
+    except ReaderError as e:
+        print(c(str(e), "red")); return 1
+    return 1
+
+
 def cmd_var(args) -> int:
     action = args.action
     if action == "profiles":
@@ -1408,6 +1532,50 @@ def build_parser() -> argparse.ArgumentParser:
         vsub.add_parser("profiles", help="lista perfiles de terminal preconfigurados").set_defaults(func=cmd_var)
         q = vsub.add_parser("apply", help="aplica un perfil de terminal preconfigurado")
         q.add_argument("id", help="ver 'var profiles'"); q.set_defaults(func=cmd_var)
+
+    # gp (GlobalPlatform: keysets del Secure Channel; escritura de JavaCards)
+    sp = sub.add_parser("gp", help="GlobalPlatform (keysets / Secure Channel)")
+    gsub = sp.add_subparsers(dest="gpcmd", required=True)
+    ksp = gsub.add_parser("keyset", help="gestiona keysets (claves ENC/MAC/KEK)")
+    kacts = ksp.add_subparsers(dest="action", required=True)
+    q = kacts.add_parser("add", help="añade/reemplaza un keyset")
+    q.add_argument("name")
+    q.add_argument("--enc", help="clave ENC (hex, 16/24 bytes)")
+    q.add_argument("--mac", help="clave MAC (hex)")
+    q.add_argument("--kek", help="clave KEK/DEK (hex)")
+    q.add_argument("--same", help="usar la misma clave para ENC/MAC/KEK (hex)")
+    q.add_argument("--kvn", type=lambda x: int(x, 0), default=0, help="Key Version Number (0=auto)")
+    q.add_argument("--scp", choices=["auto", "02", "03"], default="auto")
+    q.add_argument("--desc")
+    q.set_defaults(func=cmd_gp_keyset)
+    kacts.add_parser("list", help="lista keysets del proyecto").set_defaults(func=cmd_gp_keyset)
+    q = kacts.add_parser("show", help="muestra un keyset (claves ofuscadas)")
+    q.add_argument("name"); q.add_argument("--reveal", action="store_true", help="mostrar claves completas")
+    q.set_defaults(func=cmd_gp_keyset)
+    q = kacts.add_parser("rm", help="borra un keyset"); q.add_argument("name")
+    q.set_defaults(func=cmd_gp_keyset)
+
+    def _gp_op(name, help):
+        o = gsub.add_parser(name, help=help)
+        o.add_argument("--keyset", required=True, help="nombre del keyset (gp keyset list)")
+        o.add_argument("--enc", action="store_true", help="canal con C-ENC además de C-MAC")
+        o.set_defaults(func=cmd_gp_op, gpcmd=name)
+        return o
+    _gp_op("auth", "abre el canal seguro (verifica las claves)")
+    _gp_op("status", "GET STATUS: ISD, aplicaciones y paquetes")
+    o = _gp_op("delete", "DELETE de un AID")
+    o.add_argument("aid", help="AID en hex")
+    o.add_argument("--no-related", action="store_true", help="no borrar dependencias")
+    o = _gp_op("install", "carga e instala un CAP (load + install)")
+    o.add_argument("cap", help="ruta al fichero .cap")
+    o.add_argument("--instance", help="AID de la instancia (por defecto = módulo)")
+    o.add_argument("--module", help="AID del módulo/applet (por defecto el primero)")
+    o.add_argument("--priv", help="privilegios en hex (por defecto 00)")
+    o.add_argument("--params", help="parámetros de instalación en hex (tag C9)")
+    o.add_argument("--load-only", action="store_true", help="solo cargar el paquete, sin instanciar")
+    o.add_argument("--force", action="store_true", help="borrar el paquete previo si existe")
+    o = _gp_op("store-data", "STORE DATA (un bloque)")
+    o.add_argument("hex", help="datos en hex")
 
     # bombercat
     sp = sub.add_parser("bombercat", help="integración con BomberCat (serie)")

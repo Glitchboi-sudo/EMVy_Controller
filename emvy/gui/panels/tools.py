@@ -9,8 +9,8 @@ from html import escape
 
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QComboBox, QHBoxLayout, QHeaderView,
-    QLineEdit, QPlainTextEdit, QPushButton, QTabWidget, QTableWidget,
+    QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QHeaderView,
+    QLabel, QLineEdit, QPlainTextEdit, QPushButton, QTabWidget, QTableWidget,
     QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -32,7 +32,7 @@ class ToolsPanel(QTabWidget):
         self.win = win
         self.flags = _FlagsTool(win)
         self.iso = _IsoTool(win)
-        self.write = _WriteTool(win)
+        self.write = _CardWriteTool(win)     # Escritura directa (APDU) + GlobalPlatform
         self.addTab(self.flags, "Flags")
         self.addTab(self.iso, "ISO 8583")
         self.addTab(self.write, "Escritura")
@@ -44,6 +44,13 @@ class ToolsPanel(QTabWidget):
 
     def iso_response(self, resp) -> None:
         self.iso.show_response(resp)
+
+    def gp_log(self, lines) -> None:
+        self.write.append_gp_lines(lines)
+        self.setCurrentWidget(self.write)
+
+    def gp_refresh(self) -> None:
+        self.write.refresh_keysets()
 
 
 class _FlagsTool(QWidget):
@@ -176,15 +183,24 @@ _OPS = [("UPDATE RECORD", "record"), ("UPDATE BINARY", "binary"),
         ("PUT DATA", "data"), ("APPEND RECORD", "append")]
 
 
-class _WriteTool(QWidget):
+class _CardWriteTool(QWidget):
+    """Escritura en tarjeta, en dos secciones coherentes: **Escritura directa
+    (APDU)** para ISO 7816/EMV sin canal seguro, y **GlobalPlatform** (canal
+    seguro SCP02/03: autenticar, GET STATUS, instalar CAP, DELETE). Comparten un
+    único log al pie."""
+
     def __init__(self, win) -> None:
         super().__init__()
         self.win = win
-        warn = QPlainTextEdit(
-            "⚠ Modifica la tarjeta (puede ser irreversible). Solo tarjetas propias/de "
-            "laboratorio; muchas escrituras exigen canal seguro (SW 6982/6985).")
-        warn.setReadOnly(True); warn.setMaximumHeight(48)
+        lay = QVBoxLayout(self)
 
+        # -- sección 1: escritura directa (APDU) ---------------------------
+        s1 = QLabel("Escritura directa (APDU)"); s1.setProperty("section", True)
+        s1.setStyleSheet("font-weight:700;")
+        warn = QLabel("⚠ Modifica la tarjeta (puede ser irreversible). Solo tarjetas "
+                      "propias/de laboratorio; muchas escrituras exigen canal seguro "
+                      "(SW 6982/6985) → usa GlobalPlatform abajo.")
+        warn.setWordWrap(True)
         self._op = QComboBox()
         for label, val in _OPS:
             self._op.addItem(label, val)
@@ -198,11 +214,37 @@ class _WriteTool(QWidget):
         self._data = QLineEdit(); self._data.setPlaceholderText("datos en hex")
         write = QPushButton("Escribir"); write.clicked.connect(self._write)
         row2 = QHBoxLayout(); row2.addWidget(self._data, 1); row2.addWidget(write)
+        lay.addWidget(s1); lay.addWidget(warn); lay.addLayout(row1); lay.addLayout(row2)
 
+        # -- sección 2: GlobalPlatform (canal seguro) ----------------------
+        s2 = QLabel("GlobalPlatform (canal seguro SCP02/03)")
+        s2.setStyleSheet("font-weight:700; margin-top:8px;")
+        gpinfo = QLabel("Elige un keyset del proyecto (gestiónalos por CLI: 'gp keyset add').")
+        gpinfo.setWordWrap(True)
+        self._keyset = QComboBox()
+        self._enc = QCheckBox("C-ENC")
+        refresh = QPushButton("↻"); refresh.setFixedWidth(32); refresh.clicked.connect(self.refresh_keysets)
+        krow = QHBoxLayout()
+        krow.addWidget(QLabel("Keyset:")); krow.addWidget(self._keyset, 1)
+        krow.addWidget(self._enc); krow.addWidget(refresh)
+        auth = QPushButton("Autenticar"); auth.clicked.connect(lambda: self._gp("auth"))
+        status = QPushButton("GET STATUS"); status.clicked.connect(lambda: self._gp("status"))
+        install = QPushButton("Instalar CAP…"); install.clicked.connect(self._install)
+        arow = QHBoxLayout()
+        for b in (auth, status, install):
+            arow.addWidget(b)
+        arow.addStretch(1)
+        self._aid = QLineEdit(); self._aid.setPlaceholderText("AID en hex (para DELETE)")
+        delete = QPushButton("DELETE"); delete.clicked.connect(self._delete)
+        drow = QHBoxLayout(); drow.addWidget(self._aid, 1); drow.addWidget(delete)
+        lay.addWidget(s2); lay.addWidget(gpinfo); lay.addLayout(krow); lay.addLayout(arow); lay.addLayout(drow)
+
+        # -- log compartido -------------------------------------------------
         self._log = _log()
-        lay = QVBoxLayout(self)
-        lay.addWidget(warn); lay.addLayout(row1); lay.addLayout(row2); lay.addWidget(self._log, 1)
+        lay.addWidget(self._log, 1)
+        self.refresh_keysets()
 
+    # -- escritura directa --------------------------------------------------
     def _write(self) -> None:
         op = self._op.currentData()
         try:
@@ -230,3 +272,37 @@ class _WriteTool(QWidget):
         self._log.appendPlainText(f"{op.upper()}  SW {resp.sw_hex}  {cardwrite.write_status(resp.sw)}")
         if resp.data:
             self._log.appendPlainText("   data: " + to_hex(resp.data))
+
+    # -- GlobalPlatform -----------------------------------------------------
+    def refresh_keysets(self) -> None:
+        from ...project import store
+        self._keyset.clear()
+        proj = store.active_project()
+        names = [k.name for k in store.load_keysets(proj)] if proj else []
+        self._keyset.addItems(names)
+
+    def _selected(self):
+        name = self._keyset.currentText().strip()
+        if not name:
+            self.win.notify.emit("No hay keyset seleccionado (añade con 'gp keyset add')."); return None
+        return name
+
+    def _gp(self, action: str, **kw) -> None:
+        name = self._selected()
+        if name:
+            self.win.gp_op(action, name, enc=self._enc.isChecked(), **kw)
+
+    def _install(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Elegir CAP", "", "CAP (*.cap);;Todos (*)")
+        if path:
+            self._gp("install", cap=path)
+
+    def _delete(self) -> None:
+        aid = self._aid.text().strip()
+        if not aid:
+            self.win.notify.emit("Indica un AID (hex) para DELETE."); return
+        self._gp("delete", aid=aid)
+
+    def append_gp_lines(self, lines) -> None:
+        for line in lines:
+            self._log.appendPlainText(line)

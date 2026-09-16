@@ -98,6 +98,13 @@ def _env() -> dict:
     e = dict(os.environ)
     e.setdefault("NO_COLOR", "1")
     e.setdefault("TERM", "dumb")
+    # bombercat-tools >= v1.3.0 enruta `tags`/`readers` por un orquestador de
+    # auto-flash cuya política es ASK en TTY / NEVER en pipe. Como EMVy invoca por
+    # subprocess capturando stdout, un ASK dejaría un prompt de confirmación
+    # invisible bloqueado en stdin. Fijamos NEVER para que falle limpio (mismatch
+    # de firmware) en vez de colgarse; el usuario flashea explícito desde el panel.
+    # Las versiones antiguas (la vendorizada, v1.1.0.0) ignoran la variable.
+    e.setdefault("BOMBERCAT_AUTO_FLASH", "never")
     return e
 
 

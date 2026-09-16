@@ -145,10 +145,79 @@ def capture_card(
 
 
 def capture_reader(reader, **kw) -> CardDump:
-    """Conveniencia: captura desde un `OpenReader` (toma ATR y nombre de él)."""
-    atr = reader.atr() if reader.atr else b""
+    """Conveniencia: captura desde un `OpenReader` (toma ATR y nombre de él).
+
+    Si el lector es de **banda magnética** (sin `transceive`, con `read_swipe`)
+    lee un swipe y lo convierte con `swipe_to_dump`; si no, hace captura EMV."""
     name = reader.device.name if reader.device else ""
+    if reader.transceive is None and reader.read_swipe is not None:
+        timeout = kw.get("timeout", 30.0)
+        return swipe_to_dump(reader.swipe(timeout=timeout), reader=name)
+    atr = reader.atr() if reader.atr else b""
     return capture_card(reader.transceive, atr=atr, reader=name, **kw)
+
+
+def swipe_to_dump(raw: str, reader: str = "") -> CardDump:
+    """Convierte una lectura HID cruda en un `CardDump` visualizable.
+
+    Estos lectores de banda "teclean" el swipe por HID. El contenido decide:
+
+    * si hay **pistas** (`%B...?;...?`) → app ``MAGSTRIPE`` con PAN/nombre/
+      caducidad/código de servicio y las pistas crudas;
+    * si hay texto pero **sin centinelas de pista** (p.ej. `2202081151`) → sigue
+      siendo una lectura de **banda** (muchas tarjetas de acceso/regalo llevan en
+      la banda solo un número): app ``MAGSTRIPE`` con el dato crudo, más su
+      interpretación hex por si fuese un UID (el mismo canal HID sirve también
+      los taps NFC de los combos, indistinguibles por contenido);
+    * si está vacío (timeout) → dump sin aplicaciones.
+
+    El valor crudo se guarda como blob (búsqueda de flags/guardado). Sin TLV: no
+    es EMV."""
+    from ..core.track import parse_swipe
+
+    parsed = parse_swipe(raw)
+    t1, t2, t3 = parsed.get("track1"), parsed.get("track2"), parsed.get("track3")
+    has_tracks = any(t is not None for t in (t1, t2, t3))
+
+    apps: list[dict] = []
+    if has_tracks:
+        fields: dict[str, str] = {}
+        pan = getattr(t2, "pan", None) or getattr(t1, "pan", None) or getattr(t3, "pan", None)
+        expiry = getattr(t2, "expiry", None) or getattr(t1, "expiry", None)
+        service = getattr(t2, "service_code", None) or getattr(t1, "service_code", None)
+        name = getattr(t1, "name", None)
+        if pan:
+            fields["PAN"] = pan
+        if name:
+            fields["Nombre"] = name
+        if expiry:
+            fields["Caducidad (YYMM)"] = expiry
+        if service:
+            fields["Código de servicio"] = service
+        for label, t in (("Track 1", t1), ("Track 2", t2), ("Track 3", t3)):
+            if t is not None:
+                fields[label] = getattr(t, "raw", "")
+        apps.append({"aid": "MAGSTRIPE", "scheme": "Banda magnética", "label": "",
+                     "source": reader or "swipe", "cardholder": fields, "records": []})
+    elif raw.strip():
+        token = raw.strip()
+        fields = {"Datos": token}
+        if token.isdigit():
+            hx = f"{int(token):X}"                # por si fuese un UID/número en hex
+            if len(hx) % 2:
+                hx = "0" + hx
+            fields["Hex"] = hx
+            # algunos lectores dan los bytes en orden inverso (LSB primero)
+            rev = bytes.fromhex(hx)[::-1].hex().upper()
+            if rev != hx:
+                fields["Hex (LSB primero)"] = rev
+        apps.append({"aid": "MAGSTRIPE", "scheme": "Banda magnética", "label": "",
+                     "source": reader or "swipe", "cardholder": fields, "records": []})
+
+    dump = CardDump(reader=reader, applications=apps)
+    if raw:
+        dump.add_blob("hid-read", raw.encode("latin-1", "replace"))
+    return dump
 
 
 def find_flags(dump: CardDump, patterns=None) -> list[Hit]:

@@ -565,6 +565,59 @@ class EmvyApp(App):
             except Exception:
                 pass
 
+    # -- GlobalPlatform: canal seguro + gestión (hilo de trabajo) ----------
+    @work(thread=True, exclusive=True, group="card")
+    def gp_op_ui(self, action: str, keyset_name: str, *, enc: bool = False, **kw) -> None:
+        from ..core.gp import apdu as gpapdu   # noqa: F401
+        from ..core.gp import cap as capmod
+        from ..core.gp import content
+        from ..core.gp.scp import GPError, SEC_CENC, SEC_CMAC
+        from ..core.hexutil import from_hex
+        if not (self.reader and self.reader.transceive):
+            self.call_from_thread(self.notify, "Conecta un lector de chip/NFC primero.",
+                                  severity="warning")
+            return
+        proj = store.active_project()
+        ks = store.get_keyset(proj, keyset_name) if proj else None
+        if not ks:
+            self.call_from_thread(self.notify, f"Keyset {keyset_name!r} no existe.",
+                                  severity="error")
+            return
+        send = self.active_send()
+        try:
+            chan = content.authenticate(send, ks, security_level=SEC_CENC if enc else SEC_CMAC)
+            lines = [f"[green]Canal seguro: SCP{chan.protocol} (keyset {ks.name})[/]"]
+            if action == "status":
+                inv = content.list_all(chan)
+                for key, label in (("isd", "ISD"), ("apps", "Apps/SD"),
+                                   ("load_files", "Paquetes")):
+                    lines.append(f"[b]── {label} ──[/]")
+                    lines += [f"  {a.aid}  {a.lifecycle}  {a.privileges}" for a in inv[key]] \
+                        or ["  [dim](ninguno)[/]"]
+            elif action == "delete":
+                content.delete(chan, from_hex(kw["aid"]), related=True)
+                lines.append(f"DELETE {kw['aid']} OK")
+            elif action == "install":
+                capf = capmod.parse_cap(kw["cap"])
+                lines.append(f"CAP: paquete {capf.package_aid_hex}")
+                res = content.install_cap(chan, capf)
+                lines += [f"  {s}: {v}" for s, v in res.steps]
+                lines.append(f"[green]Instalado: paquete {res.package_aid}"
+                             + (f", instancia {res.instance_aid}" if res.instance_aid else "") + "[/]")
+        except GPError as e:
+            self.call_from_thread(self._on_gp_lines, [f"[red]✗ GP: {e}[/]"])
+            return
+        except Exception as e:  # noqa: BLE001
+            self.call_from_thread(self._on_gp_lines, [f"[red]✗ {e}[/]"])
+            return
+        self.call_from_thread(self._on_gp_lines, lines)
+
+    def _on_gp_lines(self, lines) -> None:
+        try:
+            self.query_one("#screen-write").log_lines(lines)   # Escritura (sección GP)
+        except Exception:
+            pass
+
     # -- Fuzzing de terminales: magspoof (hilo de trabajo) ------------------
     @work(thread=True, exclusive=True, group="card")
     def fuzz_magspoof_ui(self, track1: str | None, track2: str | None) -> None:

@@ -55,6 +55,9 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle(f"EMVy Controller {__version__} {__release__}")
+        from .brand import brand_icon
+        from .theme import ACCENT
+        self.setWindowIcon(brand_icon("logo", ACCENT))
         self.resize(1120, 760)
 
         # -- estado de sesión ----------------------------------------------
@@ -183,6 +186,8 @@ class MainWindow(QMainWindow):
     def _on_tab_changed(self, index: int) -> None:
         name = self.tabs.tabText(index) if index >= 0 else ""
         self._console_dock.setVisible(name in self._CONSOLE_TABS)
+        if name == "Herramientas":
+            self.tools_panel.gp_refresh()      # keysets del proyecto activo
         # mantener la selección de la barra lateral en sincronía
         for row, ti in getattr(self, "_nav_to_tab", {}).items():
             if ti == index and self.nav.currentRow() != row:
@@ -293,6 +298,12 @@ class MainWindow(QMainWindow):
 
     # -- captura -----------------------------------------------------------
     def capture(self, mode: str = "auto", raw: bool = False) -> None:
+        # Banda magnética: el lector no tiene `transceive` (no es EMV), sino
+        # `read_swipe`. Se lee un swipe y se decodifican las pistas — no pasa por
+        # `_need_reader` (que exige APDUs).
+        if self.reader and self.reader.transceive is None and self.reader.read_swipe:
+            self._capture_swipe()
+            return
         if not self._need_reader():
             return
         self.notify.emit("Capturando…")
@@ -319,13 +330,44 @@ class MainWindow(QMainWindow):
                on_result=lambda d: self.dump_ready.emit(d),
                on_error=lambda m: self.notify.emit(f"Captura: {m}"))
 
+    def _capture_swipe(self) -> None:
+        """Lee un swipe del lector de banda y decodifica las pistas."""
+        self.notify.emit("Pasa la tarjeta por el lector…")
+        self.console.banner("banda magnética: esperando swipe (30 s)…")
+        reader = self.reader
+        name = self.reader_device.name if self.reader_device else ""
+
+        def _do(progress=None):
+            # OJO: corre en el hilo del worker → NO tocar widgets aquí. El swipe
+            # crudo se manda a la consola por `progress` (señal → hilo GUI).
+            from ..session.capture import swipe_to_dump
+            raw = reader.swipe(timeout=30.0)
+            if raw and progress:
+                progress(f"swipe crudo: {raw}")
+            return swipe_to_dump(raw, reader=name)
+
+        submit(self.pool, _do, want_progress=True,
+               on_line=lambda m: self.console.info(m),
+               on_result=lambda d: self.dump_ready.emit(d),
+               on_error=lambda m: self.notify.emit(f"Swipe: {m}"))
+
     def _on_dump(self, dump) -> None:
         self.last_dump = dump
         self.explorer_panel.show_dump(dump)
         self.dashboard_panel.reload()
         n_apps, n_blobs = len(dump.applications), len(dump.blobs)
         backend = getattr(self.reader_device, "backend", None)
-        if backend == "bombercat" and not dump.applications and n_blobs <= 1:
+        aid0 = dump.applications[0].get("aid") if dump.applications else None
+        if aid0 == "MAGSTRIPE":
+            ch = dump.applications[0].get("cardholder") or {}
+            if ch.get("PAN"):
+                self.notify.emit(f"Banda leída: PAN {ch['PAN']}"
+                                 + (f" · exp {ch['Caducidad (YYMM)']}" if ch.get("Caducidad (YYMM)") else ""))
+            else:
+                self.notify.emit(f"Banda leída: {ch.get('Datos', '(sin datos)')}")
+        elif backend == "msr" and not dump.applications:
+            self.notify.emit("No se leyó nada (timeout). Pasa la tarjeta de nuevo.")
+        elif backend == "bombercat" and not dump.applications and n_blobs <= 1:
             self.notify.emit("Sin datos: la tarjeta pudo moverse (rango NFC de mm). "
                              "Sosténla firme y reintenta.")
         else:
@@ -545,6 +587,48 @@ class MainWindow(QMainWindow):
         submit(self.pool, _do, on_result=_ok,
                on_error=lambda m: self.notify.emit(f"Escritura: {m}"))
 
+    # -- GlobalPlatform: canal seguro + gestión de contenido ---------------
+    def gp_op(self, action: str, keyset_name: str, *, enc: bool = False, **kw) -> None:
+        if not self._need_reader():
+            return
+        from ..project import store
+        proj = store.active_project()
+        ks = store.get_keyset(proj, keyset_name) if proj else None
+        if not ks:
+            self.notify.emit(f"Keyset {keyset_name!r} no existe."); return
+        send = self.active_send()
+        self.console.banner(f"GP {action} (keyset {ks.name})")
+
+        def _do():
+            from ..core.gp import apdu as gpapdu
+            from ..core.gp import cap as capmod
+            from ..core.gp import content
+            from ..core.gp.scp import SEC_CENC, SEC_CMAC
+            chan = content.authenticate(send, ks, security_level=SEC_CENC if enc else SEC_CMAC)
+            lines = [f"Canal seguro: SCP{chan.protocol} (keyset {ks.name})"]
+            if action == "status":
+                inv = content.list_all(chan)
+                for key, label in (("isd", "ISD"), ("apps", "Apps/SD"),
+                                   ("load_files", "Paquetes")):
+                    lines.append(f"── {label} ──")
+                    lines += [f"  {a.aid}  {a.lifecycle}  {a.privileges}" for a in inv[key]] \
+                        or ["  (ninguno)"]
+            elif action == "delete":
+                content.delete(chan, from_hex(kw["aid"]), related=kw.get("related", True))
+                lines.append(f"DELETE {kw['aid']} OK")
+            elif action == "install":
+                capf = capmod.parse_cap(kw["cap"])
+                lines.append(f"CAP: paquete {capf.package_aid_hex}")
+                res = content.install_cap(chan, capf, force=kw.get("force", False))
+                lines += [f"  {s}: {v}" for s, v in res.steps]
+                lines.append(f"Instalado: paquete {res.package_aid}"
+                             + (f", instancia {res.instance_aid}" if res.instance_aid else ""))
+            return lines
+
+        submit(self.pool, _do,
+               on_result=lambda lines: self.tools_panel.gp_log(lines),
+               on_error=lambda m: self.tools_panel.gp_log([f"✗ GP: {m}"]))
+
     # -- ISO 8583: enviar a un host ----------------------------------------
     def send_iso8583(self, host: str, port: int, data: bytes, header: int) -> None:
         from ..payments import iso_host
@@ -671,7 +755,9 @@ def run_gui(argv=None) -> int:
     app = QApplication.instance() or QApplication(argv or sys.argv)
     app.setApplicationName("EMVy Controller")
     app.setStyle("Fusion")     # base estable; encima va nuestro QSS (tema oscuro pro)
-    from .theme import apply_theme
+    from .brand import brand_icon
+    from .theme import ACCENT, apply_theme
+    app.setWindowIcon(brand_icon("logo", ACCENT))
     apply_theme(app)
     win = MainWindow()
     win.show()

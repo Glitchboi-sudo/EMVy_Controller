@@ -87,3 +87,23 @@ Ya hay una captura real (BomberCat genuino) para usar de ejemplo.
 - Ampliar `core.cardfuzz` con más mutaciones si surgen casos de prueba nuevos
   contra terminales reales (p.ej. variantes de TTQ, PDOL con longitudes
   inválidas, respuestas GPO fuera de rango).
+
+## GlobalPlatform — escritura/gestión de JavaCards (implementado)
+
+Secure Channel GP (SCP02/SCP03) + gestión de contenido (LOAD/INSTALL/DELETE,
+STORE DATA) en JavaCards, **nativo** en Python (extra `[gp]` → pycryptodome).
+
+Claves de la J3R150 cargadas en el proyecto activo (`gp keyset add`; keysets en
+`<proyecto>/keysets.json`). Módulos en `emvy/core/gp/`: `keyset`, `crypto`
+(SCP02/03: derivación, criptogramas, KDF, retail-MAC, ICV — validado con AES-CMAC
+RFC 4493), `apdu` (comandos GP), `scp` (canal sobre Transceiver + wrap C-MAC/
+C-ENC, autodetección de protocolo), `cap` (parseo de CAP → Load File Data Block),
+`content` (authenticate/get_status/delete/install_cap). CLI `emvy gp keyset …` y
+`emvy gp auth|status|install|delete|store-data`. GUI/TUI: pestaña **Herramientas →
+Escritura** (secciones "Escritura directa (APDU)" + "GlobalPlatform"). Tests:
+`tests/test_gp.py` + `tests/fakegpcard.py` (handshake SCP02/03 end-to-end).
+
+**Pendiente**: validación end-to-end contra la **J3R150 real** (el canal lo
+valida la tarjeta: auth con las claves reales → GET STATUS → instalar un CAP de
+prueba). Posibles ajustes tras hardware: SCP02 "i"-param (ICV encryption), nivel
+de seguridad requerido por la tarjeta, orden/again de componentes CAP exóticos.

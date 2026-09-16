@@ -20,6 +20,7 @@ tui = ["textual>=0.60"]
 gui = ["PySide6>=6.6"]
 nfc = ["nfcpy>=1.0"]
 msr = ["pyserial>=3.5", "evdev>=1.6"]
+gp = ["pycryptodome>=3.19"]   # GlobalPlatform SCP02/SCP03 (3DES/AES/CMAC)
 bombercat = ["pyserial>=3.5"]
 relay = ["paho-mqtt>=1.6"]
 dev = ["pytest>=7.0"]
@@ -36,3 +37,6 @@ py-modules = ["emvyctl"]
 
 [tool.setuptools.packages.find]
 include = ["emvy*"]
+
+[tool.setuptools.package-data]
+"emvy.gui" = ["assets/*.svg"]

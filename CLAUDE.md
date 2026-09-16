@@ -41,7 +41,8 @@ emvy/
 │   ├── oda.py       ODA: inventario, claves débiles y recuperación/verificación RSA del cert. del emisor
 │   ├── analyze.py   assess(tlvs) → informe combinado (AIP/CVM/ODA) + hallazgos + summary()
 │   ├── intercept.py motor de reglas MITM (reescribe tag/valor, set-sw) + intercepting(send,rules)
-│   └── search.py    Blob/Hit + búsqueda de flags/regex
+│   ├── search.py    Blob/Hit + búsqueda de flags/regex
+│   └── gp/          GlobalPlatform (extra [gp]=pycryptodome): keyset (modelo Keyset), crypto (SCP02 3DES / SCP03 AES: derivación, criptogramas, KDF, retail-MAC, ICV), apdu (comandos GP), scp (Secure Channel sobre Transceiver + wrap C-MAC/C-ENC, autodetección), cap (parseo CAP→Load File Data Block), content (authenticate/get_status/delete/install_cap). Escribir/gestionar JavaCards
 ├── readers/     ── EFECTOS: transporte hacia el hardware (aísla pyscard/nfcpy/evdev/pyserial)
 │   ├── types.py     Transceiver, OpenReader, DeviceInfo, Capability, ReaderError, WireEvent (traza de transporte de bajo nivel)
 │   ├── registry.py  descubrimiento unificado + open_device(on_event,on_wire) + resolve()

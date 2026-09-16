@@ -54,6 +54,10 @@ class Project:
         return self.path / "variables.json"
 
     @property
+    def keysets_path(self) -> Path:
+        return self.path / "keysets.json"
+
+    @property
     def captures_dir(self) -> Path:
         return self.path / "captures"
 

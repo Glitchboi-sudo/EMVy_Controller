@@ -75,3 +75,45 @@ def test_write_tab_sends(xdg):
             await pilot.pause()   # no revienta; muestra el SW 6982
 
     asyncio.run(scenario())
+
+
+def test_write_screen_has_gp_section_and_runs(xdg):
+    """La pestaña Escritura une escritura directa + GlobalPlatform: el canal
+    seguro corre contra una tarjeta GP falsa y su salida va al log compartido."""
+    import asyncio
+
+    from fakegpcard import FakeGPCard
+    from emvy.core.gp.keyset import DEFAULT_GP_KEY, Keyset
+    from emvy.core.hexutil import from_hex
+    from emvy.project import store
+    from textual.widgets import Select
+
+    proj = store.create_project("lab"); store.set_active("lab")
+    store.add_keyset(proj, Keyset.same_key("def"))
+
+    async def scenario():
+        from emvy.tui.app import EmvyApp
+        app = EmvyApp()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.action_tool("tool-write")
+            await pilot.pause()
+            scr = app.query_one("#screen-write")
+            # ambas secciones presentes en la misma pantalla
+            assert app.query_one("#w_op") is not None          # escritura directa
+            assert app.query_one("#gp_keyset") is not None      # GlobalPlatform
+            scr.refresh_keysets()
+            k = from_hex(DEFAULT_GP_KEY)
+
+            class FakeReader:
+                transceive = staticmethod(FakeGPCard(k, k, k, protocol="03"))
+                atr = None
+            app.reader = FakeReader()
+            app.query_one("#gp_keyset", Select).value = "def"
+            scr._do_status()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            from textual.widgets import RichLog
+            assert app.query_one("#w_log", RichLog) is not None  # log compartido
+
+    asyncio.run(scenario())

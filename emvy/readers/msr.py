@@ -25,6 +25,16 @@ MSR_HELP = (
 _MSR_HINTS = ("msr", "magnetic", "magtek", "card reader", "swipe", "mag-stripe",
               "magstripe", "id tech", "idtech")
 
+# Muchos lectores MSR HID baratos NO se identifican como tal en el nombre del
+# nodo de input (p.ej. el MSR-101U enumera como "STMicroelectronics STM32
+# Joystick"): el único indicador fiable es el VID/PID. Mapeamos IDs conocidos a
+# un nombre amistoso, y vendedores dedicados a MSR (todo su catálogo es de
+# banda) para no depender de un PID exacto.
+_KNOWN_MSR_IDS = {
+    (0x5131, 0x2007): "MSR MSR-101U",
+}
+_KNOWN_MSR_VENDORS = {0x5131}  # "MSR" (usb.ids): vendedor dedicado a lectores de banda
+
 
 # --- disponibilidad --------------------------------------------------------
 def _have_evdev() -> bool:
@@ -58,11 +68,18 @@ def _evdev_devices() -> list[DeviceInfo]:
         try:
             dev = InputDevice(path)
             name = dev.name or path
+            vid, pid = dev.info.vendor, dev.info.product
         except Exception:
             continue
-        if any(h in name.lower() for h in _MSR_HINTS):
-            out.append(DeviceInfo(BACKEND, f"evdev:{path}", f"{name} (HID)",
-                                  frozenset({Capability.MAGSTRIPE})))
+        known = _KNOWN_MSR_IDS.get((vid, pid))
+        if known:
+            label = f"{known} ({name}) (HID)"
+        elif vid in _KNOWN_MSR_VENDORS or any(h in name.lower() for h in _MSR_HINTS):
+            label = f"{name} (HID)"
+        else:
+            continue
+        out.append(DeviceInfo(BACKEND, f"evdev:{path}", label,
+                              frozenset({Capability.MAGSTRIPE})))
     return out
 
 
@@ -97,6 +114,24 @@ _SHIFT = {
 }
 
 
+_TERM_KEYS = ("KEY_ENTER", "KEY_KPENTER")
+
+
+def _swipe_done(text: str, idle_elapsed: float,
+                idle: float = 0.25, swipe_idle: float = 1.0) -> bool:
+    """¿Cerrar una lectura HID por inactividad? Puro/testeable.
+
+    Un tap NFC/RFID emite un token plano (dígitos) **sin ENTER**, así que cierra
+    rápido (`idle`). Un swipe de banda trae centinelas (`%`/`;`) y termina en
+    ENTER; si el burst tiene un hueco (p.ej. entre Track 1 y Track 2) no debe
+    cortarse a media pista, así que espera bastante más (`swipe_idle`) como red
+    de seguridad por si faltara el ENTER."""
+    if not text:
+        return False
+    looks_swipe = "%" in text or ";" in text
+    return idle_elapsed > (swipe_idle if looks_swipe else idle)
+
+
 def _key_char(keyname: str, shift: bool) -> str:
     if keyname.startswith("KEY_") and len(keyname) == 5 and keyname[4].isalpha():
         c = keyname[4]
@@ -114,10 +149,15 @@ def _open_evdev(path: str) -> OpenReader:
     device = DeviceInfo(BACKEND, f"evdev:{path}", f"{dev.name} (HID)",
                         frozenset({Capability.MAGSTRIPE}))
 
-    def read_swipe(timeout: float = 30.0) -> str:
+    def read_swipe(timeout: float = 30.0, idle: float = 0.25) -> str:
+        """Lee una pasada HID. Devuelve al recibir ENTER (swipe de banda) o tras
+        `idle` segundos sin teclas nuevas habiendo ya datos: los taps NFC/RFID de
+        estos combos emiten el UID como número **sin ENTER**, así que sin este
+        corte por inactividad se colgaría hasta `timeout`."""
         buf: list[str] = []
         shift = False
         deadline = time.monotonic() + timeout
+        last = 0.0  # instante de la última tecla útil
         try:
             dev.grab()  # evita que el swipe llegue a la terminal
         except Exception:
@@ -126,6 +166,8 @@ def _open_evdev(path: str) -> OpenReader:
             while time.monotonic() < deadline:
                 r = dev.read_one()
                 if r is None:
+                    if _swipe_done("".join(buf), time.monotonic() - last, idle):
+                        break  # NFC sin ENTER (o swipe sin cierre): por inactividad
                     time.sleep(0.005)
                     continue
                 if r.type != ecodes.EV_KEY:
@@ -137,9 +179,10 @@ def _open_evdev(path: str) -> OpenReader:
                     continue
                 if ev.keystate != 1:  # solo key-down
                     continue
-                if keyname == "KEY_ENTER":
+                if keyname in _TERM_KEYS:  # swipe: cierre inmediato al ENTER
                     break
                 buf.append(_key_char(keyname, shift))
+                last = time.monotonic()
         finally:
             try:
                 dev.ungrab()

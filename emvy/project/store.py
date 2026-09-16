@@ -164,6 +164,42 @@ def save_project_variables(project: Project, variables: list[Variable]) -> None:
     save_variables(project.variables_path, variables)
 
 
+# --- keysets de GlobalPlatform (claves de Secure Channel por tarjeta) ------
+def load_keysets(project: Project) -> list["Keyset"]:
+    from ..core.gp.keyset import Keyset
+    p = project.keysets_path
+    if not p.exists():
+        return []
+    data = json.loads(p.read_text())
+    return [Keyset.from_dict(d) for d in data]
+
+
+def save_keysets(project: Project, keysets: list["Keyset"]) -> None:
+    project.keysets_path.write_text(
+        json.dumps([k.to_dict() for k in keysets], indent=2, ensure_ascii=False))
+
+
+def add_keyset(project: Project, keyset: "Keyset") -> list["Keyset"]:
+    """Añade o reemplaza (por nombre) un keyset; devuelve la lista resultante."""
+    keysets = [k for k in load_keysets(project) if k.name != keyset.name]
+    keysets.append(keyset)
+    save_keysets(project, keysets)
+    return keysets
+
+
+def get_keyset(project: Project, name: str) -> "Keyset | None":
+    for k in load_keysets(project):
+        if k.name == name:
+            return k
+    return None
+
+
+def remove_keyset(project: Project, name: str) -> list["Keyset"]:
+    keysets = [k for k in load_keysets(project) if k.name != name]
+    save_keysets(project, keysets)
+    return keysets
+
+
 # --- capturas --------------------------------------------------------------
 def save_capture(project: Project, name: str, json_text: str) -> Path:
     config.ensure_dir(project.captures_dir)

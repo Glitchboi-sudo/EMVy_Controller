@@ -13,8 +13,11 @@ from PyInstaller.utils.hooks import collect_submodules
 ROOT = os.path.abspath(os.path.join(SPECPATH, ".."))   # raíz del repo
 ENTRY = os.path.join(SPECPATH, "emvy_gui.py")
 
-# Firmware incluido en el bundle (config.repo_root() apunta a _MEIPASS al congelar).
-datas = [(os.path.join(ROOT, "firmware"), "firmware")]
+# Firmware + assets de marca en el bundle (config.repo_root() → _MEIPASS al congelar).
+datas = [
+    (os.path.join(ROOT, "firmware"), "firmware"),
+    (os.path.join(ROOT, "emvy", "gui", "assets"), "emvy/gui/assets"),
+]
 
 # pyscard (smartcard) y pyserial cargan submódulos por nombre → declararlos.
 hiddenimports = collect_submodules("smartcard") + [

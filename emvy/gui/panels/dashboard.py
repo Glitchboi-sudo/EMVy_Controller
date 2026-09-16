@@ -15,8 +15,9 @@ from PySide6.QtWidgets import (
 
 from ... import __release__, __version__
 from ...project import store
+from ..brand import brand_pixmap
 from ..icons import icon
-from ..theme import ACCENT_FG, MUTED, TEXT
+from ..theme import ACCENT, ACCENT_FG, MUTED, TEXT
 
 
 class DashboardPanel(QWidget):
@@ -25,12 +26,20 @@ class DashboardPanel(QWidget):
         self.win = win
         self._next_action = None
 
-        # -- encabezado compacto -------------------------------------------
-        title = QLabel("EMVy Controller")
-        title.setStyleSheet(f"font-size:20px; font-weight:700; color:{TEXT};")
+        # -- encabezado con la marca (mark + wordmark + versión) -----------
+        mark = QLabel(); mark.setPixmap(brand_pixmap("logo", 46, ACCENT))
+        mark.setFixedSize(mark.pixmap().size())
+        wm = QLabel(); wm.setPixmap(brand_pixmap("wordmark", 30, TEXT))
+        wm.setFixedSize(wm.pixmap().size())
+        ctrl = QLabel("Controller"); ctrl.setStyleSheet(f"color:{MUTED}; font-size:20px; font-weight:600;")
+        wmrow = QHBoxLayout(); wmrow.setSpacing(8); wmrow.setContentsMargins(0, 0, 0, 0)
+        wmrow.addWidget(wm); wmrow.addWidget(ctrl, 0, Qt.AlignBottom)
         ver = QLabel(f"v{__version__} · {__release__} · EMV security testing & card exploration")
         ver.setStyleSheet(f"color:{MUTED}; font-size:12px;")
-        head = QVBoxLayout(); head.setSpacing(2); head.addWidget(title); head.addWidget(ver)
+        text_col = QVBoxLayout(); text_col.setSpacing(2)
+        text_col.addLayout(wmrow); text_col.addWidget(ver)
+        head = QHBoxLayout(); head.setSpacing(14)
+        head.addWidget(mark, 0, Qt.AlignVCenter); head.addLayout(text_col); head.addStretch(1)
 
         # -- fila de tarjetas de estado ------------------------------------
         self._proj_box, self._proj_v, self._proj_c = self._stat("Proyecto activo")
