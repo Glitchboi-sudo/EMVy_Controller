@@ -33,9 +33,16 @@ class FirmwarePanel(QWidget):
         row.addWidget(QLabel("Sketch")); row.addWidget(self._sketch, 1)
         row.addWidget(self._port); row.addWidget(comp); row.addWidget(upl); row.addWidget(rel)
 
+        # permisos USB (reglas udev + grupos) — resuelve el fallo de picotool/serie
+        perms = QPushButton("Configurar permisos USB")
+        perms.clicked.connect(lambda: self.win.setup_usb_permissions())
+        permrow = QHBoxLayout()
+        permrow.addWidget(QLabel("Permisos:"))
+        permrow.addWidget(perms); permrow.addStretch(1)
+
         self._log = QPlainTextEdit(readOnly=True); self._log.setFont(_MONO)
         lay = QVBoxLayout(self)
-        lay.addWidget(sub); lay.addLayout(row); lay.addWidget(self._log, 1)
+        lay.addWidget(sub); lay.addLayout(row); lay.addLayout(permrow); lay.addWidget(self._log, 1)
         self.reload()
 
     def reload(self) -> None:

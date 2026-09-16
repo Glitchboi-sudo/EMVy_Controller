@@ -1,7 +1,0 @@
-# venv aislado y cachés creados por EMVy (no versionar)
-.venv/
-__pycache__/
-*.pyc
-.pytest_cache/
-# caché de releases de firmware (.uf2 descargados)
-.cache/

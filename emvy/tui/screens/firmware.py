@@ -48,6 +48,7 @@ class BombercatScreen(VerticalScroll):
             yield Button("Refrescar lista", id="fw_refresh")
             yield Button("Dispositivos", id="fw_devices")
             yield Button("Preparar venv", id="fw_setup")
+            yield Button("Permisos USB", id="fw_setupenv")
         yield ListView(id="fw_list")
         with Horizontal(classes="row"):
             yield Input(placeholder="puerto (opcional)", id="fw_port")
@@ -139,6 +140,12 @@ class BombercatScreen(VerticalScroll):
     def _setup(self):
         self.log("[dim]preparando venv de bombercat-tools…[/]")
         self.app.bombercat_setup_ui()
+
+    @on(Button.Pressed, "#fw_setupenv")
+    def _setupenv(self):
+        self.log("[dim]configurando permisos USB (udev + grupos); acepta la "
+                 "elevación si aparece…[/]")
+        self.app.bombercat_setup_env_ui()
 
     # -- flashear / eliminar ------------------------------------------------
     @on(Button.Pressed, "#fw_flash")

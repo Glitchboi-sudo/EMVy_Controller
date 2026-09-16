@@ -1229,6 +1229,10 @@ def cmd_bombercat_bridge(args) -> int:
             if rest and rest[0] == "--":
                 rest = rest[1:]
             return bctools.run_passthrough(["relay", *rest])
+        if action == "setup-env":
+            print(c("Configurando permisos USB (reglas udev + grupos). Necesita "
+                    "root; si no lo eres, se te indicará el 'sudo' a ejecutar.", "yellow"))
+            return bctools.setup_env_passthrough()
     except bctools.BombercatToolsError as e:
         print(c(str(e), "red"), file=sys.stderr)
         return 2
@@ -1625,6 +1629,7 @@ def build_parser() -> argparse.ArgumentParser:
     q.set_defaults(func=cmd_bombercat)
     # --- puente al framework bombercat-tools (vendorizado) ---
     bsub.add_parser("setup", help="prepara bombercat-tools (venv del framework)").set_defaults(func=cmd_bombercat_bridge)
+    bsub.add_parser("setup-env", help="permisos USB: reglas udev + grupos (Linux; sudo)").set_defaults(func=cmd_bombercat_bridge)
     bsub.add_parser("devices", help="lista dispositivos (framework)").set_defaults(func=cmd_bombercat_bridge)
     bsub.add_parser("status", help="firmware flasheado (framework)").set_defaults(func=cmd_bombercat_bridge)
     q = bsub.add_parser("tools", help="passthrough al framework: bombercat tools -- <args>")

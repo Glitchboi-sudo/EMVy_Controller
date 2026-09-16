@@ -1,0 +1,3 @@
+[submodule "vendor/bombercat-tools"]
+	path = vendor/bombercat-tools
+	url = https://github.com/ElectronicCats/bombercat-tools

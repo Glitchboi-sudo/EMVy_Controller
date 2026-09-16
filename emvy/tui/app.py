@@ -868,6 +868,23 @@ class EmvyApp(App):
         except Exception as e:  # noqa: BLE001
             self.call_from_thread(self._fw_log, f"[red]setup falló: {e}[/]")
 
+    @work(thread=True, exclusive=True, group="fw")
+    def bombercat_setup_env_ui(self) -> None:
+        """Permisos USB (reglas udev + grupos) via bombercat-tools setup-env,
+        elevado con pkexec. Resuelve fallos de picotool/serie."""
+        from ..integrations import bombercat_tools as bt
+        try:
+            cp = bt.setup_env_gui()
+            out = (cp.stdout or "") + (cp.stderr or "")
+            self.call_from_thread(self._fw_log, escape(out.strip()) or "(sin salida)")
+            ok = cp.returncode == 0
+            self.call_from_thread(
+                self._fw_log,
+                "[green]Permisos aplicados. Reconecta el BomberCat.[/]" if ok
+                else f"[red]setup-env devolvió returncode {cp.returncode}.[/]")
+        except Exception as e:  # noqa: BLE001
+            self.call_from_thread(self._fw_log, f"[red]permisos USB: {e}[/]")
+
     # -- ISO 8583: envío a un host (hilo de trabajo) -----------------------
     @work(thread=True, exclusive=True, group="iso")
     def send_iso8583_ui(self, host: str, port: str, data: bytes, header: str) -> None:

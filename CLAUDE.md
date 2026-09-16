@@ -681,15 +681,22 @@ tener que activarlo antes; se activa por ruta (`set_active_path`) y no se borra 
 
 ## 12. bombercat-tools (framework oficial) + firmware unificado
 
-**bombercat-tools** (Electronic Cats, v1.1.0.0) es el framework oficial que controla el BomberCat y
+**bombercat-tools** (Electronic Cats, v1.2.0.0) es el framework oficial que controla el BomberCat y
 flashea firmwares `.uf2` prebuilt (release `ElectronicCats/bombercat-firmware`, v1.2.0.0: NFCGate,
-DetectTags, DetectReaders, magspoof, WiFiWebServer…). Está **vendorizado** en
-`vendor/bombercat-tools/` (ver `UPSTREAM.txt`); usa su **propio venv aislado** en
-`vendor/bombercat-tools/.venv` (deps con pines propios, no el venv de EMVy).
+DetectTags, DetectReaders, magspoof, WiFiWebServer…). Está como **submódulo git** en
+`vendor/bombercat-tools/` (`git submodule update --init`; `.gitmodules`), fijado al commit
+`c636721` (v1.2.0.0 + `setup-env`, aún sin tag: es HEAD de `feature/packaging`/PR#3 — re-pinear a un
+tag cuando lo publiquen). Usa su **propio venv aislado** en `vendor/bombercat-tools/.venv` (deps con
+pines propios, no el venv de EMVy). CI lo inicializa con `submodules: recursive`.
 
 - **Adaptador**: `emvy/integrations/bombercat_tools.py` lo maneja por **subprocess** —
   `locate()`/`ensure_venv()` (bootstrap perezoso), `run_passthrough()`, `run_json()` (extrae JSON de
-  la salida rica), y helpers `devices()/status()/fw_list()/flash()/tags_read()/readers_read()`.
+  la salida rica), helpers `devices()/status()/fw_list()/flash()/tags_read()/readers_read()`, y
+  `setup_env_passthrough()`/`setup_env_gui()` (permisos USB: reglas udev `99-bombercat.rules` +
+  grupos `dialout`/`plugdev`, Linux; la variante GUI eleva con `pkexec`). `_env()` fija
+  `BOMBERCAT_AUTO_FLASH=never` para que `tags`/`readers` no cuelguen en un prompt de auto-flash
+  invisible al invocarse por subprocess. CLI `emvy bombercat setup-env`; botón "Permisos USB"/
+  "Configurar permisos USB" en el panel BomberCat (TUI/GUI).
   Para la **TUI** (que no hereda stdout) hay variantes que **capturan**: `fw_list_names()` (parsea la
   tabla de `flash --list`), `flash_capture()`, `devices_text()`, `status_text()` — las usa la pestaña
   **BomberCat**. Ruta configurable con `EMVY_BOMBERCAT_TOOLS`.
