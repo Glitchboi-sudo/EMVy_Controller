@@ -268,7 +268,11 @@ def setup_env_gui(*, progress=None) -> subprocess.CompletedProcess:
     pkexec, indica el `sudo` a ejecutar a mano."""
     root = locate()
     py = ensure_venv(root, log=progress)
-    inner = [str(py), "bombercat.py", "setup-env"]
+    # Ruta ABSOLUTA a bombercat.py: pkexec resetea el cwd al home del target
+    # (/root) e ignora `cwd=`, así que una ruta relativa fallaría. Python añade
+    # el dir del script a sys.path, no el cwd, por lo que `import modules...` sigue
+    # resolviendo bien con la ruta absoluta.
+    inner = [str(py), str(root / "bombercat.py"), "setup-env"]
     if os.name == "nt":
         raise BombercatToolsError("setup-env es solo para Linux (udev + usermod).")
     if os.geteuid() == 0:                              # ya root: directo
