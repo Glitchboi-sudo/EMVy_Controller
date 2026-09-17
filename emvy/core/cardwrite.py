@@ -36,6 +36,27 @@ def write_status(sw: int) -> str:
     return f"SW {sw:04X}"
 
 
+# Pistas accionables para los status words de escritura más habituales, en
+# lenguaje llano (para la UI: qué hacer a continuación). Presentación pura.
+def write_hint(sw: int) -> str | None:
+    if sw == 0x9000:
+        return None
+    if sw in (0x6982, 0x6985):
+        return ("La tarjeta exige canal seguro/autenticación para escribir. Si es "
+                "una JavaCard/GlobalPlatform en blanco, primero instala/personaliza "
+                "un applet EMV vía GlobalPlatform (sección de abajo).")
+    if sw == 0x6986:
+        return ("No hay fichero (EF) seleccionado. Selecciona antes una aplicación "
+                "EMV (Explorador → Capturar) o usa una tarjeta ya personalizada.")
+    if sw in (0x6A82, 0x6A83):
+        return "El fichero/registro no existe en la tarjeta — prueba otro SFI/registro."
+    if sw == 0x6A84:
+        return "No queda espacio en el fichero para ese registro."
+    if sw == 0x6700:
+        return "Longitud de datos incorrecta para ese registro/fichero."
+    return None
+
+
 def update_record(send: Transceiver, sfi: int, record: int, data: bytes) -> Response:
     return send(apdumod.update_record(record, sfi, data))
 

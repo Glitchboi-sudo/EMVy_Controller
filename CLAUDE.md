@@ -34,15 +34,15 @@ emvy/
 │   ├── emv.py       flujo EMV sobre un `send`: discover/select/GPO/AFL/records/GET DATA
 │   ├── rawscan.py   escaneo CRUDO (cualquier ISO 7816): SELECT por RID parcial + AIDs, READ RECORD, GET DATA, READ BINARY; read_type4_ndef() lee un tag NFC Forum Type 4 (NDEF) siguiendo la spec (SELECT AID→CC→fichero NDEF)
 │   ├── ndef.py      NDEF puro: parse_records() (Texto/URI/MIME…), find_ndef_tlv() (TLV 0x03 en CC/fichero NDEF), summarize()
-│   ├── cardwrite.py ESCRITURA en tarjeta: UPDATE RECORD/BINARY, PUT DATA, APPEND RECORD + write_status()
-│   ├── cardfuzz.py  plantillas para PROBAR terminales/POS: pistas mutadas (magspoof) + registros EMV mutados (para escribir)
+│   ├── cardwrite.py ESCRITURA en tarjeta: UPDATE RECORD/BINARY, PUT DATA, APPEND RECORD + write_status() + write_hint() (pista accionable en llano por SW)
+│   ├── cardfuzz.py  plantillas para PROBAR terminales/POS: pistas mutadas (magspoof) + registros EMV mutados (para escribir) + personalize_record() (registro '70' amistoso PAN/caducidad/titular→5A/57/5F24/5F20, base de la personalización rápida de Escritura) + TEST_RECORD
 │   ├── emvbits.py   decodificadores de bits: AIP/AUC/TTQ (Flag name/is_set)
 │   ├── cvm.py       CVM List (8E) → reglas + notas de riesgo (No CVM/PIN claro/firma)
 │   ├── oda.py       ODA: inventario, claves débiles y recuperación/verificación RSA del cert. del emisor
 │   ├── analyze.py   assess(tlvs) → informe combinado (AIP/CVM/ODA) + hallazgos + summary()
 │   ├── intercept.py motor de reglas MITM (reescribe tag/valor, set-sw) + intercepting(send,rules)
 │   ├── search.py    Blob/Hit + búsqueda de flags/regex
-│   └── gp/          GlobalPlatform (extra [gp]=pycryptodome): keyset (modelo Keyset), crypto (SCP02 3DES / SCP03 AES: derivación, criptogramas, KDF, retail-MAC, ICV), apdu (comandos GP), scp (Secure Channel sobre Transceiver + wrap C-MAC/C-ENC, autodetección), cap (parseo CAP→Load File Data Block), content (authenticate/get_status/delete/install_cap). Escribir/gestionar JavaCards
+│   └── gp/          GlobalPlatform (extra [gp]=pycryptodome): keyset (modelo Keyset), crypto (SCP02 3DES / SCP03 AES: derivación, criptogramas, KDF, retail-MAC, ICV), apdu (comandos GP), scp (Secure Channel sobre Transceiver + wrap C-MAC/C-ENC, autodetección), cap (parseo CAP→Load File Data Block), content (authenticate/get_status [AppInfo.modules = AIDs de módulos instanciables, tag 84]/list_modules/delete/**restore_virgin** [deja la tarjeta 'virgen': borra instancias que no sean ISD/SD/keep_aids; opcional delete_packages]/install_cap [carga+instancia un CAP EMV abierto] + **install_instance** [instancia un módulo YA cargado: INSTALL [for install] — "inicializar" la tarjeta sin cargar código] + **smart_write**: escritura inteligente — prueba la escritura directa y, si la tarjeta exige canal seguro [SW 6982/6985], abre GP con un keyset y reintenta la escritura envuelta; devuelve `SmartWriteResult` con log del proceso). Escribir/gestionar JavaCards
 ├── readers/     ── EFECTOS: transporte hacia el hardware (aísla pyscard/nfcpy/evdev/pyserial)
 │   ├── types.py     Transceiver, OpenReader, DeviceInfo, Capability, ReaderError, WireEvent (traza de transporte de bajo nivel)
 │   ├── registry.py  descubrimiento unificado + open_device(on_event,on_wire) + resolve()
@@ -194,7 +194,25 @@ Frontend **nativo** alternativo a la TUI (para quien prefiere ventana de escrito
 mismo núcleo puro; `emvy/gui/`. **Paridad de pestañas con la TUI**: **Inicio** (estado + proyectos
 recientes + acciones rápidas), **Proyectos**, **Variables** (+perfiles), **Lectores**, **Explorador**
 (capturar → árbol TLV con inspector: copiar hex/ASCII, asignar a variable, guardar captura),
-**Herramientas** (sub-tabs Flags · ISO 8583 · Escritura), **Cobros** (switch ISO 8583), **PoC**
+**Herramientas** (sub-tabs Flags · ISO 8583 · **Escritura**: UX **guiada por intención** —una barra de
+**canal seguro** (keyset + C-ENC) compartida arriba, con hint que dice si se autenticará sola; luego dos
+pestañas (GUI `QTabWidget`, TUI `TabbedContent`) + un log común abajo—: **«Personalizar»** (amistoso, por
+defecto) con **preset** (Visa/Mastercard/Amex de prueba / Personalizado) que rellena PAN/caducidad/titular/
+cód.servicio, **vista previa en vivo** del registro EMV (resumen PAN/Cad/Titular + Track2 + hex, via
+`cardfuzz.personalize_record`), y botones «Datos de prueba», «Copiar hex», «Editar en Avanzado→» (lleva el
+hex a la otra pestaña) y **«Escribir en la tarjeta»** (CTA); y **«Avanzado»** con dos grupos: **Escritura
+directa (APDU)** (op + **campos contextuales** según el op) y **GlobalPlatform · inicializar/gestionar la
+tarjeta** (probar auth · Ver contenido/GET STATUS —lista los **módulos instanciables** de cada paquete— ·
+**Instalar CAP EMV** [`install_cap`] · **Instanciar applet cargado** [paquete/módulo/instancia →
+`install_instance`, INSTALL [for install] de un módulo ya LOADED] · DELETE · **Restaurar (virgen)**
+[`restore_virgin`: borra instancias, conserva ISD/SD/fábrica]). Toda escritura es **inteligente**: prueba
+directo y, si la tarjeta pide canal seguro (6982/6985), **autentica sola por GlobalPlatform** con el keyset y
+reintenta (`content.smart_write`). Flujo de una tarjeta en blanco: (restaurar→virgen) → instalar/instanciar un
+applet EMV → seleccionable → personalizar en «Personalizar». **Ojo**: solo funciona con applets que soporten
+perso por UPDATE RECORD (p.ej. un CAP EMV abierto); los Visa/EMV licenciados de fábrica suelen rechazar
+UPDATE RECORD/PUT DATA (6D00) y exigir perso propietaria (STORE DATA/DGI). El log añade una **pista accionable** por SW vía
+`cardwrite.write_hint()`),
+**Cobros** (switch ISO 8583), **PoC**
 (runner del proyecto), **Intercept** (reglas MITM; `active_send` las envuelve al activar), **BomberCat**
 (compilar/subir firmware con arduino-cli) y **Fuzzing** (banda/EMV/NDEF + emulación). En el carril de
 emulación un **único botón "Emular"** decide **NFC o EMV según la Fuente**: `NFC · plantilla NDEF (fuzz)`,

@@ -534,34 +534,51 @@ class EmvyApp(App):
     # -- Escritura en tarjeta (hilo de trabajo) ----------------------------
     @work(thread=True, exclusive=True, group="card")
     def write_card_ui(self, op: str, params: dict) -> None:
+        """Escritura **inteligente**: directa y, si la tarjeta exige canal seguro
+        (6982/6985), autentica sola por GlobalPlatform con el keyset elegido y
+        reintenta. `params` puede traer `keyset` (nombre) y `enc`."""
         from ..core import cardwrite
+        from ..core.gp import content
+        from ..core.gp.scp import SEC_CENC, SEC_CMAC
         if not (self.reader and self.reader.transceive):
             self.call_from_thread(self.notify, "Conecta un lector de chip/NFC primero.",
                                   severity="warning")
             return
         send = self.active_send()
-        try:
-            data = params["data"]
+        data = params["data"]
+        ks = None
+        if params.get("keyset"):
+            proj = store.active_project()
+            ks = store.get_keyset(proj, params["keyset"]) if proj else None
+
+        def write_fn(s):
             if op == "record":
-                resp = cardwrite.update_record(send, params["sfi"], params["record"], data)
-            elif op == "binary":
-                resp = cardwrite.update_binary(send, params["offset"], data, sfi=params.get("sfi"))
-            elif op == "data":
-                resp = cardwrite.put_data(send, params["tag"], data)
-            elif op == "append":
-                resp = cardwrite.append_record(send, params["sfi"], data)
-            else:
-                return
+                return cardwrite.update_record(s, params["sfi"], params["record"], data)
+            if op == "binary":
+                return cardwrite.update_binary(s, params["offset"], data, sfi=params.get("sfi"))
+            if op == "data":
+                return cardwrite.put_data(s, params["tag"], data)
+            if op == "append":
+                return cardwrite.append_record(s, params["sfi"], data)
+            raise ValueError(op)
+
+        try:
+            res = content.smart_write(
+                send, write_fn, keyset=ks,
+                security_level=SEC_CENC if params.get("enc") else SEC_CMAC)
         except Exception as e:  # noqa: BLE001
             self.call_from_thread(self.notify, f"Escritura: {e}", severity="error")
             return
-        self.call_from_thread(self._on_write, op, resp)
+        self.call_from_thread(self._on_write, op, res)
 
-    def _on_write(self, op: str, resp) -> None:
+    def _on_write(self, op: str, res) -> None:
         # write_card_ui() lo usan tanto la pestaña Escritura como Fuzzing.
         for sid in ("#screen-write", "#screen-fuzz"):
             try:
-                self.query_one(sid).log_write(op, resp)
+                screen = self.query_one(sid)
+                if res.log and hasattr(screen, "log_lines"):
+                    screen.log_lines(res.log)
+                screen.log_write(op, res.response)
             except Exception:
                 pass
 
@@ -592,11 +609,26 @@ class EmvyApp(App):
                 for key, label in (("isd", "ISD"), ("apps", "Apps/SD"),
                                    ("load_files", "Paquetes")):
                     lines.append(f"[b]── {label} ──[/]")
-                    lines += [f"  {a.aid}  {a.lifecycle}  {a.privileges}" for a in inv[key]] \
-                        or ["  [dim](ninguno)[/]"]
+                    if not inv[key]:
+                        lines.append("  [dim](ninguno)[/]")
+                    for a in inv[key]:
+                        lines.append(f"  {a.aid}  {a.lifecycle}  {a.privileges}")
+                        lines += [f"      [cyan]└ módulo {m}[/]" for m in a.modules]
             elif action == "delete":
                 content.delete(chan, from_hex(kw["aid"]), related=True)
                 lines.append(f"DELETE {kw['aid']} OK")
+            elif action == "wipe":
+                res = content.restore_virgin(
+                    chan, keep_aids=kw.get("keep", ()),
+                    delete_packages=kw.get("packages", False))
+                lines += [f"[green]{m}[/]" if "Virgen" in m else m for m in res.log]
+            elif action == "instantiate":
+                content.install_instance(
+                    chan, from_hex(kw["package"]), from_hex(kw["module"]),
+                    from_hex(kw["instance"]),
+                    make_selectable=not kw.get("no_selectable", False))
+                lines.append(f"[green]Instancia creada: {kw['instance']} "
+                             f"(módulo {kw['module']})[/]")
             elif action == "install":
                 capf = capmod.parse_cap(kw["cap"])
                 lines.append(f"CAP: paquete {capf.package_aid_hex}")

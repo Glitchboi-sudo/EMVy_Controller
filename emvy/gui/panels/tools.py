@@ -9,11 +9,12 @@ from html import escape
 
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QHeaderView,
-    QLabel, QLineEdit, QPlainTextEdit, QPushButton, QTabWidget, QTableWidget,
-    QTableWidgetItem, QVBoxLayout, QWidget,
+    QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QFormLayout, QGroupBox,
+    QHBoxLayout, QHeaderView, QLabel, QLineEdit, QPlainTextEdit, QPushButton,
+    QTabWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
+from ...core import cardfuzz
 from ...core.hexutil import from_hex, to_hex
 from ...core.search import search_flags, search_regex
 from ...payments import iso8583
@@ -183,68 +184,270 @@ _OPS = [("UPDATE RECORD", "record"), ("UPDATE BINARY", "binary"),
         ("PUT DATA", "data"), ("APPEND RECORD", "append")]
 
 
+_PRESETS = [
+    ("Visa (prueba)", dict(pan="4111111111111111", expiry="2812", name="TEST/CARD", service_code="201")),
+    ("Mastercard (prueba)", dict(pan="5555555555554444", expiry="2812", name="TEST/CARD", service_code="201")),
+    ("Amex (prueba)", dict(pan="371449635398431", expiry="2812", name="TEST/CARD", service_code="201")),
+    ("Personalizado…", None),
+]
+
+
 class _CardWriteTool(QWidget):
-    """Escritura en tarjeta, en dos secciones coherentes: **Escritura directa
-    (APDU)** para ISO 7816/EMV sin canal seguro, y **GlobalPlatform** (canal
-    seguro SCP02/03: autenticar, GET STATUS, instalar CAP, DELETE). Comparten un
-    único log al pie."""
+    """Escritura en tarjeta, con una UX guiada por intención:
+
+    * **Personalizar** — el camino amistoso: elige un preset o rellena
+      PAN/caducidad/titular, mira la vista previa del registro EMV, y escríbelo
+      en un clic. La escritura es *inteligente*: si la tarjeta exige canal seguro
+      abre GlobalPlatform sola con el keyset elegido.
+    * **Avanzado** — escritura directa por APDU (UPDATE RECORD/BINARY, PUT DATA,
+      APPEND) e **inicializar/gestionar** la tarjeta por GlobalPlatform (auth,
+      GET STATUS, instalar CAP, instanciar applet, DELETE, restaurar a virgen).
+
+    Arriba, una barra de **canal seguro** (keyset) compartida por todo; abajo, un
+    log común."""
 
     def __init__(self, win) -> None:
         super().__init__()
         self.win = win
         lay = QVBoxLayout(self)
+        lay.setSpacing(8)
 
-        # -- sección 1: escritura directa (APDU) ---------------------------
-        s1 = QLabel("Escritura directa (APDU)"); s1.setProperty("section", True)
-        s1.setStyleSheet("font-weight:700;")
-        warn = QLabel("⚠ Modifica la tarjeta (puede ser irreversible). Solo tarjetas "
-                      "propias/de laboratorio; muchas escrituras exigen canal seguro "
-                      "(SW 6982/6985) → usa GlobalPlatform abajo.")
-        warn.setWordWrap(True)
-        self._op = QComboBox()
-        for label, val in _OPS:
-            self._op.addItem(label, val)
-        self._sfi = QLineEdit(); self._sfi.setPlaceholderText("SFI"); self._sfi.setFixedWidth(70)
-        self._num = QLineEdit(); self._num.setPlaceholderText("registro / offset"); self._num.setFixedWidth(120)
-        self._tag = QLineEdit(); self._tag.setPlaceholderText("tag (PUT DATA)"); self._tag.setFixedWidth(120)
-        row1 = QHBoxLayout()
-        for x in (self._op, self._sfi, self._num, self._tag):
-            row1.addWidget(x)
-        row1.addStretch(1)
-        self._data = QLineEdit(); self._data.setPlaceholderText("datos en hex")
-        write = QPushButton("Escribir"); write.clicked.connect(self._write)
-        row2 = QHBoxLayout(); row2.addWidget(self._data, 1); row2.addWidget(write)
-        lay.addWidget(s1); lay.addWidget(warn); lay.addLayout(row1); lay.addLayout(row2)
+        title = QLabel("Escritura en tarjeta"); title.setProperty("section", True)
+        title.setStyleSheet("font-weight:700; font-size:15px;")
+        lay.addWidget(title)
 
-        # -- sección 2: GlobalPlatform (canal seguro) ----------------------
-        s2 = QLabel("GlobalPlatform (canal seguro SCP02/03)")
-        s2.setStyleSheet("font-weight:700; margin-top:8px;")
-        gpinfo = QLabel("Elige un keyset del proyecto (gestiónalos por CLI: 'gp keyset add').")
-        gpinfo.setWordWrap(True)
+        # -- barra de canal seguro (compartida por Personalizar + Avanzado) --
         self._keyset = QComboBox()
         self._enc = QCheckBox("C-ENC")
         refresh = QPushButton("↻"); refresh.setFixedWidth(32); refresh.clicked.connect(self.refresh_keysets)
-        krow = QHBoxLayout()
-        krow.addWidget(QLabel("Keyset:")); krow.addWidget(self._keyset, 1)
-        krow.addWidget(self._enc); krow.addWidget(refresh)
-        auth = QPushButton("Autenticar"); auth.clicked.connect(lambda: self._gp("auth"))
-        status = QPushButton("GET STATUS"); status.clicked.connect(lambda: self._gp("status"))
-        install = QPushButton("Instalar CAP…"); install.clicked.connect(self._install)
+        bar = QHBoxLayout()
+        lk = QLabel("🔒 Canal seguro · keyset:")
+        bar.addWidget(lk); bar.addWidget(self._keyset, 1); bar.addWidget(self._enc); bar.addWidget(refresh)
+        self._sec_hint = QLabel()
+        self._sec_hint.setStyleSheet("color:#94A3B8;")
+        self._keyset.currentTextChanged.connect(self._update_sec_hint)
+        lay.addLayout(bar); lay.addWidget(self._sec_hint)
+
+        # -- pestañas por intención -----------------------------------------
+        self._tabs = QTabWidget()
+        self._tabs.addTab(self._page_personalize(), "Personalizar")
+        self._tabs.addTab(self._page_advanced(), "Avanzado")
+        lay.addWidget(self._tabs, 1)
+
+        # -- log compartido -------------------------------------------------
+        self._log = _log(); self._log.setMaximumHeight(150)
+        lay.addWidget(QLabel("Registro:"))
+        lay.addWidget(self._log)
+        self.refresh_keysets()
+        self._apply_preset()          # arranca con el preset por defecto (Visa)
+        self._update_preview()
+
+    # -- páginas ------------------------------------------------------------
+    def _page_personalize(self) -> QWidget:
+        w = QWidget(); v = QVBoxLayout(w)
+        sub = QLabel("Elige un preset o rellena los campos; se genera un registro EMV "
+                     "(5A/57/5F24/5F20) y se escribe en SFI 1 · registro 1.")
+        sub.setWordWrap(True); sub.setStyleSheet("color:#94A3B8;")
+        v.addWidget(sub)
+
+        self._preset = QComboBox()
+        for label, _data in _PRESETS:
+            self._preset.addItem(label)
+        self._preset.currentIndexChanged.connect(self._apply_preset)
+
+        self._p_pan = QLineEdit(); self._p_pan.setPlaceholderText("16 dígitos, p.ej. 4111111111111111")
+        self._p_exp = QLineEdit(); self._p_exp.setPlaceholderText("YYMM, p.ej. 2812")
+        self._p_name = QLineEdit(); self._p_name.setPlaceholderText("p.ej. TEST/CARD")
+        self._p_svc = QLineEdit(); self._p_svc.setPlaceholderText("3 dígitos, p.ej. 201")
+        for e in (self._p_pan, self._p_exp, self._p_name, self._p_svc):
+            e.textChanged.connect(self._update_preview)
+        form = QFormLayout()
+        form.addRow("Preset", self._preset)
+        form.addRow("PAN", self._p_pan)
+        form.addRow("Caducidad (YYMM)", self._p_exp)
+        form.addRow("Titular", self._p_name)
+        form.addRow("Cód. servicio", self._p_svc)
+        v.addLayout(form)
+
+        # vista previa (resumen + hex del registro)
+        prev = QGroupBox("Vista previa del registro EMV")
+        pv = QVBoxLayout(prev)
+        self._prev_sum = QLabel(); self._prev_sum.setWordWrap(True)
+        self._prev_hex = QLineEdit(readOnly=True); self._prev_hex.setFont(_MONO)
+        pv.addWidget(self._prev_sum); pv.addWidget(self._prev_hex)
+        v.addWidget(prev)
+
+        sample = QPushButton("Datos de prueba"); sample.clicked.connect(self._fill_sample)
+        copyb = QPushButton("Copiar hex"); copyb.clicked.connect(self._copy_hex)
+        adv = QPushButton("Editar en Avanzado →"); adv.clicked.connect(self._generate)
+        perso = QPushButton("  Escribir en la tarjeta  "); perso.setProperty("accent", True)
+        perso.clicked.connect(self._personalize_write)
+        btns = QHBoxLayout()
+        btns.addWidget(sample); btns.addWidget(copyb); btns.addWidget(adv)
+        btns.addStretch(1); btns.addWidget(perso)
+        v.addLayout(btns); v.addStretch(1)
+        return w
+
+    def _page_advanced(self) -> QWidget:
+        w = QWidget(); v = QVBoxLayout(w)
+
+        # grupo A: escritura directa (APDU)
+        direct = QGroupBox("Escritura directa (APDU)")
+        dv = QVBoxLayout(direct)
+        warn = QLabel("⚠ Modifica la tarjeta (puede ser irreversible). Solo tarjetas "
+                      "propias/de laboratorio. Si la tarjeta pide canal seguro, se "
+                      "autentica sola con el keyset de arriba.")
+        warn.setWordWrap(True); warn.setStyleSheet("color:#94A3B8;")
+        self._op = QComboBox()
+        for label, val in _OPS:
+            self._op.addItem(label, val)
+        self._op.currentIndexChanged.connect(self._sync_fields)
+        self._op_lbl = QLabel("Operación")
+        self._sfi_lbl = QLabel("SFI"); self._sfi = QLineEdit(); self._sfi.setFixedWidth(90)
+        self._num_lbl = QLabel("Registro"); self._num = QLineEdit(); self._num.setFixedWidth(120)
+        self._tag_lbl = QLabel("Tag"); self._tag = QLineEdit(); self._tag.setFixedWidth(120)
+        row1 = QHBoxLayout()
+        for x in (self._op_lbl, self._op, self._sfi_lbl, self._sfi,
+                  self._num_lbl, self._num, self._tag_lbl, self._tag):
+            row1.addWidget(x)
+        row1.addStretch(1)
+        self._data = QLineEdit(); self._data.setPlaceholderText("datos en hex")
+        write = QPushButton("Escribir"); write.setProperty("accent", True)
+        write.clicked.connect(self._write)
+        row2 = QHBoxLayout(); row2.addWidget(self._data, 1); row2.addWidget(write)
+        dv.addWidget(warn); dv.addLayout(row1); dv.addLayout(row2)
+        v.addWidget(direct)
+        self._sync_fields()
+
+        # grupo B: GlobalPlatform · inicializar/gestionar
+        gp = QGroupBox("GlobalPlatform · inicializar/gestionar la tarjeta")
+        gpl = QVBoxLayout(gp)
+        gph = QLabel("Prepara una tarjeta EMV para poder escribir: instala un CAP EMV "
+                     "abierto, o instancia un applet ya cargado (GET STATUS lista los "
+                     "módulos). Luego personaliza en la pestaña «Personalizar».")
+        gph.setWordWrap(True); gph.setStyleSheet("color:#94A3B8;")
+        auth = QPushButton("Probar autenticación"); auth.clicked.connect(lambda: self._gp("auth"))
+        status = QPushButton("Ver contenido (GET STATUS)"); status.clicked.connect(lambda: self._gp("status"))
+        install = QPushButton("Instalar CAP EMV…"); install.clicked.connect(self._install)
         arow = QHBoxLayout()
         for b in (auth, status, install):
             arow.addWidget(b)
         arow.addStretch(1)
+        self._inst_pkg = QLineEdit(); self._inst_pkg.setPlaceholderText("paquete (hex)")
+        self._inst_mod = QLineEdit(); self._inst_mod.setPlaceholderText("módulo (hex)")
+        self._inst_aid = QLineEdit(); self._inst_aid.setPlaceholderText("instancia/AID a crear (hex)")
+        instantiate = QPushButton("Instanciar applet cargado"); instantiate.clicked.connect(self._instantiate)
+        irow = QHBoxLayout()
+        for x in (self._inst_pkg, self._inst_mod, self._inst_aid, instantiate):
+            irow.addWidget(x)
         self._aid = QLineEdit(); self._aid.setPlaceholderText("AID en hex (para DELETE)")
         delete = QPushButton("DELETE"); delete.clicked.connect(self._delete)
-        drow = QHBoxLayout(); drow.addWidget(self._aid, 1); drow.addWidget(delete)
-        lay.addWidget(s2); lay.addWidget(gpinfo); lay.addLayout(krow); lay.addLayout(arow); lay.addLayout(drow)
+        virgin = QPushButton("Restaurar (virgen)"); virgin.clicked.connect(self._wipe)
+        drow = QHBoxLayout(); drow.addWidget(self._aid, 1); drow.addWidget(delete); drow.addWidget(virgin)
+        gpl.addWidget(gph); gpl.addLayout(arow); gpl.addLayout(irow); gpl.addLayout(drow)
+        v.addWidget(gp); v.addStretch(1)
+        return w
 
-        # -- log compartido -------------------------------------------------
-        self._log = _log()
-        lay.addWidget(self._log, 1)
-        self.refresh_keysets()
+    # -- vista previa / presets --------------------------------------------
+    def _apply_preset(self) -> None:
+        data = _PRESETS[self._preset.currentIndex()][1]
+        if data is None:                       # "Personalizado…" → no tocar campos
+            return
+        self._p_pan.setText(data["pan"]); self._p_exp.setText(data["expiry"])
+        self._p_name.setText(data["name"]); self._p_svc.setText(data["service_code"])
+
+    def _update_preview(self) -> None:
+        rec = self._build_record()
+        self._prev_hex.setText(to_hex(rec))
+        self._prev_sum.setText(self._decode_summary(rec))
+
+    def _decode_summary(self, rec: bytes) -> str:
+        from ...core import tlv
+        try:
+            kids = {n.tag: n.value for n in tlv.parse(rec)[0].children}
+        except Exception:  # noqa: BLE001
+            return ""
+        pan = to_hex(kids.get("5A", b"")).rstrip("Ff")
+        exp = to_hex(kids.get("5F24", b""))
+        t2 = to_hex(kids.get("57", b""))
+        name = kids.get("5F20", b"").decode("latin-1", "replace")
+        return (f"PAN <b>{pan}</b> · Cad <b>{exp[:2]}/{exp[2:4]}</b> · "
+                f"Titular <b>{name}</b><br>Track2 (57): <code>{t2}</code>")
+
+    def _copy_hex(self) -> None:
+        from PySide6.QtWidgets import QApplication
+        QApplication.clipboard().setText(self._prev_hex.text())
+        self.win.notify.emit("Registro copiado al portapapeles.")
+
+    def _update_sec_hint(self) -> None:
+        ks = self._keyset.currentText().strip()
+        if ks:
+            self._sec_hint.setText(f"Se autentica sola con «{ks}» solo si la tarjeta lo exige.")
+        else:
+            self._sec_hint.setText("Sin keyset: si la tarjeta pide canal seguro, la escritura "
+                                   "se detendrá (añade uno con 'gp keyset add').")
+
+    def _write_params(self, base: dict) -> dict:
+        """Añade el keyset/C-ENC seleccionados a los params de escritura (para la
+        escalada automática a canal seguro en `MainWindow.write_op`)."""
+        ks = self._keyset.currentText().strip()
+        if ks:
+            base = {**base, "keyset": ks, "enc": self._enc.isChecked()}
+        return base
+
+    # -- personalización rápida --------------------------------------------
+    def _fill_sample(self) -> None:
+        d = cardfuzz.TEST_RECORD
+        self._p_pan.setText(d["pan"]); self._p_exp.setText(d["expiry"])
+        self._p_name.setText(d["name"]); self._p_svc.setText(d["service_code"])
+
+    def _build_record(self) -> bytes:
+        return cardfuzz.personalize_record(
+            pan=self._p_pan.text().strip() or cardfuzz.TEST_RECORD["pan"],
+            name=self._p_name.text().strip() or cardfuzz.TEST_RECORD["name"],
+            expiry=self._p_exp.text().strip() or cardfuzz.TEST_RECORD["expiry"],
+            service_code=self._p_svc.text().strip() or cardfuzz.TEST_RECORD["service_code"])
+
+    def _generate(self) -> None:
+        """Lleva el registro generado a la escritura directa (SFI 1 · reg 1) y
+        cambia a la pestaña Avanzado para revisarlo/editarlo antes de escribir."""
+        rec = self._build_record()
+        self._op.setCurrentIndex(0)          # UPDATE RECORD
+        self._sfi.setText("1"); self._num.setText("1")
+        self._data.setText(to_hex(rec))
+        self._tabs.setCurrentIndex(1)        # → Avanzado
+        self._log.appendPlainText("Registro llevado a Avanzado (revisa y pulsa «Escribir»): "
+                                  + to_hex(rec))
+
+    def _personalize_write(self) -> None:
+        rec = self._build_record()
+        self._log.appendPlainText("→ personalizar SFI 1 · reg 1: " + to_hex(rec))
+        self.win.write_op("record", self._write_params({"sfi": 1, "record": 1, "data": rec}))
+
+    def _write_test(self) -> None:
+        """Quick action: escribe el registro EMV de prueba de referencia en un clic."""
+        rec = cardfuzz.personalize_record()
+        self._log.appendPlainText("→ datos de prueba SFI 1 · reg 1: " + to_hex(rec))
+        self.win.write_op("record", self._write_params({"sfi": 1, "record": 1, "data": rec}))
 
     # -- escritura directa --------------------------------------------------
+    def _sync_fields(self) -> None:
+        """Muestra solo los campos que el op seleccionado necesita, con la
+        etiqueta/placeholder correctos (record/append: SFI+registro; binary:
+        offset+SFI; data: tag)."""
+        op = self._op.currentData()
+        show = {"sfi": op in ("record", "binary", "append"),
+                "num": op in ("record", "binary"),
+                "tag": op == "data"}
+        self._sfi_lbl.setVisible(show["sfi"]); self._sfi.setVisible(show["sfi"])
+        self._num_lbl.setVisible(show["num"]); self._num.setVisible(show["num"])
+        self._tag_lbl.setVisible(show["tag"]); self._tag.setVisible(show["tag"])
+        self._sfi_lbl.setText("SFI (opcional)" if op == "binary" else "SFI")
+        self._num_lbl.setText("Offset" if op == "binary" else "Registro")
+        self._sfi.setPlaceholderText("1")
+        self._num.setPlaceholderText("0" if op == "binary" else "1")
+        self._tag.setPlaceholderText("9F36")
+
     def _write(self) -> None:
         op = self._op.currentData()
         try:
@@ -265,13 +468,18 @@ class _CardWriteTool(QWidget):
         except ValueError:
             self.win.notify.emit("SFI/registro/offset/tag inválido."); return
         self._log.appendPlainText(f"→ {op} {to_hex(data)}…")
-        self.win.write_op(op, params)
+        self.win.write_op(op, self._write_params(params))
 
     def log_result(self, op: str, resp) -> None:
         from ...core import cardwrite
-        self._log.appendPlainText(f"{op.upper()}  SW {resp.sw_hex}  {cardwrite.write_status(resp.sw)}")
+        ok = resp.sw == 0x9000
+        mark = "✓" if ok else "✗"
+        self._log.appendPlainText(f"{mark} {op.upper()}  SW {resp.sw_hex}  {cardwrite.write_status(resp.sw)}")
         if resp.data:
             self._log.appendPlainText("   data: " + to_hex(resp.data))
+        hint = cardwrite.write_hint(resp.sw)
+        if hint:
+            self._log.appendPlainText("   ℹ " + hint)
 
     # -- GlobalPlatform -----------------------------------------------------
     def refresh_keysets(self) -> None:
@@ -280,6 +488,7 @@ class _CardWriteTool(QWidget):
         proj = store.active_project()
         names = [k.name for k in store.load_keysets(proj)] if proj else []
         self._keyset.addItems(names)
+        self._update_sec_hint()
 
     def _selected(self):
         name = self._keyset.currentText().strip()
@@ -293,15 +502,29 @@ class _CardWriteTool(QWidget):
             self.win.gp_op(action, name, enc=self._enc.isChecked(), **kw)
 
     def _install(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Elegir CAP", "", "CAP (*.cap);;Todos (*)")
+        path, _ = QFileDialog.getOpenFileName(self, "Elegir CAP EMV", "", "CAP (*.cap);;Todos (*)")
         if path:
             self._gp("install", cap=path)
+
+    def _instantiate(self) -> None:
+        pkg = self._inst_pkg.text().strip(); mod = self._inst_mod.text().strip()
+        inst = self._inst_aid.text().strip()
+        if not (pkg and mod and inst):
+            self.win.notify.emit("Indica paquete, módulo e instancia (hex). "
+                                 "Usa GET STATUS para ver los módulos.")
+            return
+        self._gp("instantiate", package=pkg, module=mod, instance=inst)
 
     def _delete(self) -> None:
         aid = self._aid.text().strip()
         if not aid:
             self.win.notify.emit("Indica un AID (hex) para DELETE."); return
         self._gp("delete", aid=aid)
+
+    def _wipe(self) -> None:
+        """Restaura la tarjeta a 'virgen': borra las instancias creadas (conserva
+        ISD/SD y los paquetes de fábrica)."""
+        self._gp("wipe")
 
     def append_gp_lines(self, lines) -> None:
         for line in lines:

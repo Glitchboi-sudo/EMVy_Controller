@@ -197,3 +197,28 @@ def test_card_ndef_from_fields():
 def test_card_record_empty_is_safe():
     dec = ndef.parse_records(ndef.card_record())[0].decoded()
     assert "sin datos" in dec
+
+
+# --- personalización (registro EMV amistoso) ----------------------------
+def test_personalize_record_coherent_fields():
+    from emvy.core import track
+    rec = cardfuzz.personalize_record(pan="4189143370041827", name="JANE DOE",
+                                      expiry="2909", service_code="201")
+    top = tlv.parse(rec)
+    assert len(top) == 1 and top[0].tag == "70"
+    kids = {n.tag: n.value for n in top[0].children}
+    assert kids["5A"].hex().upper().rstrip("F") == "4189143370041827"
+    assert kids["5F24"].hex().upper() == "290931"          # YYMM → YYMMDD (día 31)
+    assert kids["5F20"] == b"JANE DOE"
+    t2 = track.parse_track2_emv(kids["57"])                # coherente con PAN/exp/servicio
+    assert t2.pan == "4189143370041827" and t2.expiry == "2909" and t2.service_code == "201"
+
+
+def test_personalize_record_yymmdd_and_defaults():
+    rec = cardfuzz.personalize_record(expiry="270431")     # YYMMDD explícito
+    kids = {n.tag: n.value for n in tlv.parse(rec)[0].children}
+    assert kids["5F24"].hex().upper() == "270431"
+    # defaults = TEST_RECORD, registro válido y parseable
+    base = cardfuzz.personalize_record()
+    assert tlv.parse(base)[0].tag == "70"
+    assert cardfuzz.TEST_RECORD["pan"] == "4111111111111111"

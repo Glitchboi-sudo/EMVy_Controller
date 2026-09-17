@@ -562,27 +562,47 @@ class MainWindow(QMainWindow):
         self.write_op("record", {"sfi": sfi, "record": record, "data": data})
 
     def write_op(self, op: str, params: dict) -> None:
+        """Escritura **inteligente**: prueba la escritura directa y, si la tarjeta
+        exige canal seguro (6982/6985), abre GlobalPlatform con el keyset elegido y
+        reintenta — un solo paso. `params` puede traer `keyset` (nombre) y `enc`."""
         if not self._need_reader():
             return
         from ..core import cardwrite
+        from ..core.gp import content
+        from ..core.gp.scp import SEC_CENC, SEC_CMAC
         send = self.active_send()
-        self.console.banner(f"{op.upper()} {to_hex(params['data'])}")
+        data = params["data"]
+        ks = None
+        ksname = params.get("keyset")
+        if ksname:
+            from ..project import store
+            proj = store.active_project()
+            ks = store.get_keyset(proj, ksname) if proj else None
+        self.console.banner(f"{op.upper()} {to_hex(data)}"
+                            + (f" · keyset {ksname}" if ksname else ""))
 
-        def _do():
-            data = params["data"]
+        def write_fn(s):
             if op == "record":
-                return cardwrite.update_record(send, params["sfi"], params["record"], data)
+                return cardwrite.update_record(s, params["sfi"], params["record"], data)
             if op == "binary":
-                return cardwrite.update_binary(send, params["offset"], data, sfi=params.get("sfi"))
+                return cardwrite.update_binary(s, params["offset"], data, sfi=params.get("sfi"))
             if op == "data":
-                return cardwrite.put_data(send, params["tag"], data)
+                return cardwrite.put_data(s, params["tag"], data)
             if op == "append":
-                return cardwrite.append_record(send, params["sfi"], data)
+                return cardwrite.append_record(s, params["sfi"], data)
             raise ValueError(op)
 
-        def _ok(r):
-            self.tools_panel.log_write(op, r)
-            self.notify.emit(f"{op.upper()} → SW {r.sw_hex} {cardwrite.write_status(r.sw)}")
+        def _do():
+            return content.smart_write(
+                send, write_fn, keyset=ks,
+                security_level=SEC_CENC if params.get("enc") else SEC_CMAC)
+
+        def _ok(res):
+            self.tools_panel.write.append_gp_lines(res.log)
+            self.tools_panel.log_write(op, res.response)
+            r = res.response
+            tail = f" (canal seguro SCP{res.protocol})" if res.secured else ""
+            self.notify.emit(f"{op.upper()} → SW {r.sw_hex} {cardwrite.write_status(r.sw)}{tail}")
 
         submit(self.pool, _do, on_result=_ok,
                on_error=lambda m: self.notify.emit(f"Escritura: {m}"))
@@ -611,11 +631,26 @@ class MainWindow(QMainWindow):
                 for key, label in (("isd", "ISD"), ("apps", "Apps/SD"),
                                    ("load_files", "Paquetes")):
                     lines.append(f"── {label} ──")
-                    lines += [f"  {a.aid}  {a.lifecycle}  {a.privileges}" for a in inv[key]] \
-                        or ["  (ninguno)"]
+                    if not inv[key]:
+                        lines.append("  (ninguno)")
+                    for a in inv[key]:
+                        lines.append(f"  {a.aid}  {a.lifecycle}  {a.privileges}")
+                        lines += [f"      └ módulo {m}" for m in a.modules]
             elif action == "delete":
                 content.delete(chan, from_hex(kw["aid"]), related=kw.get("related", True))
                 lines.append(f"DELETE {kw['aid']} OK")
+            elif action == "wipe":
+                res = content.restore_virgin(
+                    chan, keep_aids=kw.get("keep", ()),
+                    delete_packages=kw.get("packages", False))
+                lines += res.log
+            elif action == "instantiate":
+                content.install_instance(
+                    chan, from_hex(kw["package"]), from_hex(kw["module"]),
+                    from_hex(kw["instance"]),
+                    make_selectable=not kw.get("no_selectable", False))
+                lines.append(f"Instancia creada: {kw['instance']} "
+                             f"(módulo {kw['module']})")
             elif action == "install":
                 capf = capmod.parse_cap(kw["cap"])
                 lines.append(f"CAP: paquete {capf.package_aid_hex}")
