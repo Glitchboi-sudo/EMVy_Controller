@@ -77,10 +77,22 @@ emvy/
 │   ├── app.py       MainWindow: estado de sesión + orquestación de hardware por señales Qt; run_gui()
 │   ├── worker.py    submit()/Worker(QRunnable): operaciones de hardware fuera del hilo GUI, con progreso por señales (mantiene vivos los workers en `_ACTIVE` + `setAutoDelete(False)`: si no, el pool los auto-borra y las señales `result`/`error` en cola se pierden)
 │   └── panels/      dashboard, projects, variables, readers, explorer (árbol TLV + inspector), tools (Flags/ISO8583/Escritura), charges (Cobros), poc, intercept, firmware (BomberCat), fuzz (emulación: Fuente decide NFC-NDEF [plantilla/tarjeta-de-prueba/captura] o EMV [perfilar terminal]), console (consola cruda: TX/RX completo + Exportar/Guardar en proyecto)
-├── cli.py       ── CLI (argparse) sobre todo lo anterior
-├── config.py    ── rutas XDG (datos/config); repo_root() = sys._MEIPASS al empaquetar (PyInstaller)
+├── cli.py       ── CLI (argparse) sobre todo lo anterior; main() aplica settings al arrancar
+├── config.py    ── rutas XDG (datos/config); data_home() honra override de ajustes/EMVY_DATA_HOME; repo_root() = sys._MEIPASS al empaquetar (PyInstaller)
+├── settings.py  ── PREFERENCIAS globales (tema/idioma/carpeta de datos) → <config>/settings.json; apply() empuja data_dir a config y idioma a i18n
+├── palettes.py  ── PALETAS de color con nombre (EMVy, Tokyo Night, Gruvbox, Nord, Catppuccin, Dracula, Solarized, Gruvbox Light) — un solo set de tokens viste GUI (QSS) y TUI (Theme)
+├── i18n.py      ── i18n mínimo t(key): catálogos es/en/pt (fallback es→en→clave); despliegue INCREMENTAL (nav/pestañas/botones/Ajustes migrados)
 └── term.py      ── color ANSI para la CLI (presentación)
 ```
+
+**Ajustes globales / Preferencias** (`emvy/settings.py` + pestaña **Ajustes** en GUI y TUI): tema de color
+(paletas de `palettes.py`, aplicables **en vivo** — la GUI reconstruye el QSS, la TUI cambia el `Theme`
+registrado), **idioma** (es/en/pt vía `i18n.t`; se aplica del todo al reiniciar, en vivo las pestañas/nav) y
+**carpeta de datos** (redirige proyectos/capturas/variables a otra ruta — solo datos nuevos, no mueve los
+existentes; vía `config.set_data_home`). Persisten en `<config>/settings.json`; `settings.apply(load())` corre
+al arrancar CLI/GUI/TUI. Añadir un tema = una entrada en `palettes.PALETTES`; migrar más textos a i18n = usar
+`i18n.t("clave")` y añadir la clave al catálogo. Las etiquetas de pestaña/nav usan **ids estables**
+(`_tab_specs`/`_NAV_GROUPS` por id) desacoplados del texto traducible.
 
 **Empaquetado / distribución** (`packaging/`, ver `packaging/README.md`): binarios **de la GUI** con
 PyInstaller (`EMVyController.spec`, entry `emvy_gui.py`). **AppImage** (Linux) vía Docker Ubuntu 22.04 +
@@ -423,7 +435,9 @@ with registry.open_device(dev) as r:
 - **Reutiliza**: antes de escribir, busca en `core.hexutil`, `core.tlv`, `core.apdu`, `env`. P.ej.
   serializa TLV con `tlv.encode` (no reconstruyas bytes a mano).
 - **Estilo**: PEP 8, type hints, `snake_case`/`PascalCase`/`UPPER_CASE`, f-strings, `pathlib`,
-  docstrings en funciones públicas. Comentarios y textos de usuario en **español** (consistencia).
+  docstrings en funciones públicas. Comentarios y docstrings en **español** (consistencia). Los **textos de
+  usuario** están en español por defecto pero migrando a **i18n** (`i18n.t("clave")`, catálogos es/en/pt): al
+  tocar una superficie, envuelve sus cadenas con `t()` y añade la clave al catálogo (despliegue incremental).
 - **Textual**: no nombres métodos de widget como `_render`/`render` (colisionan con la API interna);
   usa nombres propios (`_render_hits`, `show_dump`…). El hardware va en `@work(thread=True)` +
   `call_from_thread` para actualizar la UI.

@@ -14,28 +14,40 @@ sans moderna con fallbacks del sistema (IBM Plex Sans / Inter / Segoe UI…).
 """
 from __future__ import annotations
 
-# -- tokens de color (fuente de verdad) -------------------------------------
-BG        = "#0F172A"   # fondo de ventana (slate-900)
-BG_DEEP   = "#0B1220"   # inputs / consola (más profundo)
-PANEL     = "#1B2336"   # tarjetas / paneles / cabeceras
-SURFACE2  = "#272F42"   # hover / superficie elevada
-BORDER    = "#334155"   # bordes sutiles (slate-700)
-BORDER_HI = "#475569"   # bordes visibles (slate-600)
-TEXT      = "#F8FAFC"   # texto principal
-MUTED     = "#94A3B8"   # texto secundario/etiquetas
-ACCENT    = "#22C55E"   # acción/acento (green-500)
-ACCENT_HI = "#4ADE80"   # acento hover
-ACCENT_FG = "#0F172A"   # texto sobre acento
-WARNING   = "#F59E0B"
-ERROR     = "#EF4444"
-INFO      = "#38BDF8"
+from .. import palettes
+
+# -- tokens de color (fuente de verdad; se actualizan al cambiar de tema) -----
+# Se inicializan con la paleta por defecto y `apply_theme()` los reasigna. Otros
+# paneles importan estas constantes para estilos en línea; el QSS (mayoría de la
+# UI) se re-aplica en vivo, y estos valores quedan coherentes tras reiniciar.
+_DEF = palettes.get(palettes.DEFAULT)
+BG        = _DEF["bg"]
+BG_DEEP   = _DEF["bg_deep"]
+PANEL     = _DEF["panel"]
+SURFACE2  = _DEF["surface2"]
+BORDER    = _DEF["border"]
+BORDER_HI = _DEF["border_hi"]
+TEXT      = _DEF["text"]
+MUTED     = _DEF["muted"]
+ACCENT    = _DEF["accent"]
+ACCENT_HI = _DEF["accent_hi"]
+ACCENT_FG = _DEF["accent_fg"]
+WARNING   = _DEF["warning"]
+ERROR     = _DEF["error"]
+INFO      = _DEF["info"]
 
 FONT_FAMILIES = ["IBM Plex Sans", "Inter", "Segoe UI", "Cantarell",
                  "Noto Sans", "Ubuntu", "DejaVu Sans", "sans-serif"]
 MONO_FAMILIES = ["JetBrains Mono", "Cascadia Code", "Fira Code", "IBM Plex Mono",
                  "DejaVu Sans Mono", "Consolas", "monospace"]
 
-QSS = f"""
+
+def build_qss(pal: dict) -> str:
+    """Construye la hoja de estilo QSS a partir de una paleta (`palettes`)."""
+    BG, BG_DEEP, PANEL, SURFACE2 = pal["bg"], pal["bg_deep"], pal["panel"], pal["surface2"]
+    BORDER, BORDER_HI, TEXT, MUTED = pal["border"], pal["border_hi"], pal["text"], pal["muted"]
+    ACCENT, ACCENT_HI, ACCENT_FG = pal["accent"], pal["accent_hi"], pal["accent_fg"]
+    return f"""
 /* ---- base ------------------------------------------------------------ */
 QWidget {{
     background-color: {BG};
@@ -197,9 +209,29 @@ QProgressBar::chunk {{ background-color: {ACCENT}; border-radius: 8px; }}
 """
 
 
-def apply_theme(app) -> None:
-    """Aplica el tema (fuente + QSS) a la `QApplication`. Idempotente."""
+def _refresh_constants(pal: dict) -> None:
+    """Reasigna las constantes de módulo (para lecturas por atributo `theme.ACCENT`)."""
+    global BG, BG_DEEP, PANEL, SURFACE2, BORDER, BORDER_HI, TEXT, MUTED
+    global ACCENT, ACCENT_HI, ACCENT_FG, WARNING, ERROR, INFO
+    BG, BG_DEEP, PANEL, SURFACE2 = pal["bg"], pal["bg_deep"], pal["panel"], pal["surface2"]
+    BORDER, BORDER_HI, TEXT, MUTED = pal["border"], pal["border_hi"], pal["text"], pal["muted"]
+    ACCENT, ACCENT_HI, ACCENT_FG = pal["accent"], pal["accent_hi"], pal["accent_fg"]
+    WARNING, ERROR, INFO = pal["warning"], pal["error"], pal["info"]
+
+
+def apply_theme(app, palette_name: str | None = None) -> None:
+    """Aplica el tema (fuente + QSS) a la `QApplication`. Idempotente.
+
+    `palette_name` elige la paleta (`palettes.PALETTES`); si es None usa el tema
+    de los ajustes guardados. El QSS se re-aplica en vivo (recolorea toda la UI);
+    los colores en línea de algunos paneles se actualizan del todo al reiniciar.
+    """
     from PySide6.QtGui import QFont
+    if palette_name is None:
+        from .. import settings
+        palette_name = settings.load().theme
+    pal = palettes.get(palette_name)
+    _refresh_constants(pal)
     font = QFont()
     try:
         font.setFamilies(FONT_FAMILIES)   # Qt6: primera familia disponible
@@ -207,4 +239,4 @@ def apply_theme(app) -> None:
         font.setFamily(FONT_FAMILIES[0])
     font.setPointSize(10)
     app.setFont(font)
-    app.setStyleSheet(QSS)
+    app.setStyleSheet(build_qss(pal))

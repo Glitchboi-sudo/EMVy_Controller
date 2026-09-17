@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
     QMainWindow, QStatusBar, QTabWidget, QWidget,
 )
 
-from .. import __release__, __version__
+from .. import __release__, __version__, i18n
 from ..core import emv
 from ..core.hexutil import from_hex, to_hex
 from ..project import env as envmod
@@ -38,6 +38,7 @@ from .panels.intercept import InterceptPanel
 from .panels.poc import PocPanel
 from .panels.projects import ProjectsPanel
 from .panels.readers import ReadersPanel
+from .panels.settings import SettingsPanel
 from .panels.tools import ToolsPanel
 from .panels.variables import VariablesPanel
 from .worker import submit
@@ -98,18 +99,27 @@ class MainWindow(QMainWindow):
         self.intercept_panel = InterceptPanel(self)
         self.firmware_panel = FirmwarePanel(self)
         self.fuzz_panel = FuzzPanel(self)
+        self.settings_panel = SettingsPanel(self)
+        # (id estable, panel, clave i18n) — el id desacopla la lógica del texto
+        # traducible; el orden es el de las pestañas.
+        self._tab_specs = [
+            ("home", self.dashboard_panel, "nav.home"),
+            ("projects", self.projects_panel, "nav.projects"),
+            ("variables", self.variables_panel, "nav.variables"),
+            ("readers", self.readers_panel, "nav.readers"),
+            ("explorer", self.explorer_panel, "nav.explorer"),
+            ("tools", self.tools_panel, "nav.tools"),
+            ("charges", self.charges_panel, "nav.charges"),
+            ("poc", self.poc_panel, "nav.poc"),
+            ("intercept", self.intercept_panel, "nav.intercept"),
+            ("firmware", self.firmware_panel, "nav.firmware"),
+            ("fuzzing", self.fuzz_panel, "nav.fuzzing"),
+            ("settings", self.settings_panel, "nav.settings"),
+        ]
+        self._tab_ids = [tid for tid, _, _ in self._tab_specs]
         self.tabs = QTabWidget()
-        self.tabs.addTab(self.dashboard_panel, "Inicio")
-        self.tabs.addTab(self.projects_panel, "Proyectos")
-        self.tabs.addTab(self.variables_panel, "Variables")
-        self.tabs.addTab(self.readers_panel, "Lectores")
-        self.tabs.addTab(self.explorer_panel, "Explorador")
-        self.tabs.addTab(self.tools_panel, "Herramientas")
-        self.tabs.addTab(self.charges_panel, "Cobros")
-        self.tabs.addTab(self.poc_panel, "PoC")
-        self.tabs.addTab(self.intercept_panel, "Intercept")
-        self.tabs.addTab(self.firmware_panel, "BomberCat")
-        self.tabs.addTab(self.fuzz_panel, "Fuzzing")
+        for _tid, panel, key in self._tab_specs:
+            self.tabs.addTab(panel, i18n.t(key))
         # Navegación por **barra lateral** (más limpia que 11 pestañas arriba):
         # el QTabWidget conserva las páginas (y `self.tabs` sigue siendo la API)
         # pero su barra de pestañas se oculta y se conduce desde la lista lateral.
@@ -138,39 +148,45 @@ class MainWindow(QMainWindow):
         self._update_status()
         self._on_tab_changed(self.tabs.currentIndex())   # estado inicial de la consola
 
-    # Pestañas donde la consola cruda (APDU/transporte) aporta; en el resto se
-    # oculta para reducir ruido visual.
-    _CONSOLE_TABS = frozenset({"Lectores", "Explorador", "Herramientas", "Cobros",
-                               "PoC", "Intercept", "BomberCat", "Fuzzing"})
+    # Pestañas (por id) donde la consola cruda (APDU/transporte) aporta; en el
+    # resto se oculta para reducir ruido visual.
+    _CONSOLE_TAB_IDS = frozenset({"readers", "explorer", "tools", "charges",
+                                  "poc", "intercept", "firmware", "fuzzing"})
 
-    # Navegación agrupada de la barra lateral: (grupo, [(etiqueta, icono)…]).
+    # Navegación agrupada de la barra lateral: (clave-grupo i18n, [(id, icono)…]).
     _NAV_GROUPS = (
-        ("SESIÓN", (("Inicio", "home"), ("Proyectos", "folder"),
-                    ("Variables", "sliders"), ("Lectores", "plug"))),
-        ("TARJETA", (("Explorador", "search"), ("Herramientas", "wrench"))),
-        ("OPERACIONES", (("Cobros", "credit-card"), ("PoC", "flask"),
-                         ("Intercept", "shield"), ("Fuzzing", "zap"))),
-        ("HARDWARE", (("BomberCat", "cpu"),)),
+        ("group.session", (("home", "home"), ("projects", "folder"),
+                           ("variables", "sliders"), ("readers", "plug"))),
+        ("group.card", (("explorer", "search"), ("tools", "wrench"))),
+        ("group.ops", (("charges", "credit-card"), ("poc", "flask"),
+                       ("intercept", "shield"), ("fuzzing", "zap"))),
+        ("group.hardware", (("firmware", "cpu"),)),
+        ("group.settings", (("settings", "sliders"),)),
     )
+
+    def _tab_id_index(self, tab_id: str) -> int:
+        return self._tab_ids.index(tab_id)
 
     def _build_sidebar(self) -> QListWidget:
         from .icons import icon
         nav = QListWidget(); nav.setObjectName("nav")
         nav.setFixedWidth(198); nav.setIconSize(QSize(18, 18))
         nav.setUniformItemSizes(False)
-        tab_index = {self.tabs.tabText(i): i for i in range(self.tabs.count())}
         self._nav_to_tab: dict[int, int] = {}
+        self._nav_headers: list[tuple] = []      # (row, group_key) para retraducir
+        self._nav_items: list[tuple] = []        # (row, tab_id) para retraducir
         first_row = None
-        for gname, items in self._NAV_GROUPS:
-            hdr = QListWidgetItem(gname); hdr.setFlags(Qt.NoItemFlags)
-            nav.addItem(hdr)
-            for label, ic in items:
-                if label not in tab_index:
+        for gkey, items in self._NAV_GROUPS:
+            hdr = QListWidgetItem(i18n.t(gkey)); hdr.setFlags(Qt.NoItemFlags)
+            nav.addItem(hdr); self._nav_headers.append((nav.row(hdr), gkey))
+            for tab_id, ic in items:
+                if tab_id not in self._tab_ids:
                     continue
-                it = QListWidgetItem(icon(ic, color="#CBD5E1"), label)
+                it = QListWidgetItem(icon(ic, color="#CBD5E1"), i18n.t("nav." + tab_id))
                 nav.addItem(it)
                 row = nav.row(it)
-                self._nav_to_tab[row] = tab_index[label]
+                self._nav_to_tab[row] = self._tab_id_index(tab_id)
+                self._nav_items.append((row, tab_id))
                 if first_row is None:
                     first_row = row
         nav.currentRowChanged.connect(self._on_nav_changed)
@@ -178,15 +194,38 @@ class MainWindow(QMainWindow):
             nav.setCurrentRow(first_row)
         return nav
 
+    # -- idioma / tema en vivo --------------------------------------------
+    def retranslate(self) -> None:
+        """Reaplica el idioma a las etiquetas de pestañas y barra lateral (el
+        resto de textos se traducen al reconstruir/reiniciar)."""
+        for i, (_tid, _panel, key) in enumerate(self._tab_specs):
+            self.tabs.setTabText(i, i18n.t(key))
+        for row, gkey in getattr(self, "_nav_headers", []):
+            self.nav.item(row).setText(i18n.t(gkey))
+        for row, tab_id in getattr(self, "_nav_items", []):
+            self.nav.item(row).setText(i18n.t("nav." + tab_id))
+        try:
+            self.settings_panel.retranslate()
+        except Exception:
+            pass
+
+    def apply_theme_live(self, palette_name: str) -> None:
+        """Recolorea toda la GUI aplicando el QSS de la paleta elegida."""
+        from PySide6.QtWidgets import QApplication
+        from .theme import apply_theme
+        app = QApplication.instance()
+        if app is not None:
+            apply_theme(app, palette_name)
+
     def _on_nav_changed(self, row: int) -> None:
         idx = self._nav_to_tab.get(row)
         if idx is not None:
             self.tabs.setCurrentIndex(idx)
 
     def _on_tab_changed(self, index: int) -> None:
-        name = self.tabs.tabText(index) if index >= 0 else ""
-        self._console_dock.setVisible(name in self._CONSOLE_TABS)
-        if name == "Herramientas":
+        tab_id = self._tab_ids[index] if 0 <= index < len(self._tab_ids) else ""
+        self._console_dock.setVisible(tab_id in self._CONSOLE_TAB_IDS)
+        if tab_id == "tools":
             self.tools_panel.gp_refresh()      # keysets del proyecto activo
         # mantener la selección de la barra lateral en sincronía
         for row, ti in getattr(self, "_nav_to_tab", {}).items():
@@ -237,7 +276,8 @@ class MainWindow(QMainWindow):
         """Recarga los paneles dependientes de proyecto/estado (tras crear/
         activar un proyecto, guardar variables, etc.) — como refresh_ui de la TUI."""
         for panel in (self.dashboard_panel, self.projects_panel, self.variables_panel,
-                      self.readers_panel, self.explorer_panel, self.poc_panel):
+                      self.readers_panel, self.explorer_panel, self.poc_panel,
+                      self.settings_panel):
             try:
                 panel.reload()
             except Exception:
@@ -805,13 +845,17 @@ def run_gui(argv=None) -> int:
     from ..integrations import pcscd
     started_pcscd = pcscd.ensure_started()
 
+    # Ajustes globales (tema/idioma/carpeta de datos) antes de construir la UI.
+    from .. import settings as settingsmod
+    prefs = settingsmod.apply(settingsmod.load())
+
     app = QApplication.instance() or QApplication(argv or sys.argv)
     app.setApplicationName("EMVy Controller")
     app.setStyle("Fusion")     # base estable; encima va nuestro QSS (tema oscuro pro)
     from .brand import brand_icon
     from .theme import ACCENT, apply_theme
+    apply_theme(app, prefs.theme)
     app.setWindowIcon(brand_icon("logo", ACCENT))
-    apply_theme(app)
     win = MainWindow()
     win.show()
     try:

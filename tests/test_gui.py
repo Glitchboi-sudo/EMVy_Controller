@@ -28,6 +28,8 @@ def qapp():
 def win(qapp, tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    from emvy import settings
+    settings.apply(settings.load())        # idioma/datos deterministas (por defecto)
     from emvy.gui.app import MainWindow
     w = MainWindow()
     yield w
@@ -240,11 +242,14 @@ def test_explorer_show_dump_builds_tree(win):
     assert any("SFI 1" in x for x in labels)
 
 
-def test_all_eleven_tabs(win):
+def test_all_tabs(win):
+    from emvy import i18n
     tabs = win.tabs
+    assert win._tab_ids == [
+        "home", "projects", "variables", "readers", "explorer", "tools",
+        "charges", "poc", "intercept", "firmware", "fuzzing", "settings"]
     assert [tabs.tabText(i) for i in range(tabs.count())] == [
-        "Inicio", "Proyectos", "Variables", "Lectores", "Explorador",
-        "Herramientas", "Cobros", "PoC", "Intercept", "BomberCat", "Fuzzing"]
+        i18n.t("nav." + tid) for tid in win._tab_ids]
 
 
 def test_intercept_apply_and_toggle(win):

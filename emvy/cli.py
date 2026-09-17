@@ -1710,6 +1710,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv=None) -> int:
+    # aplica preferencias globales (carpeta de datos redirigida, idioma) para que
+    # todos los comandos usen la ubicación de datos elegida por el usuario.
+    from . import settings as _settings
+    _settings.apply(_settings.load())
     started_pcscd = pcscd.ensure_started()
     try:
         args = build_parser().parse_args(argv)
