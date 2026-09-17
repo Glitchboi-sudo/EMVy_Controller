@@ -19,9 +19,9 @@ Requiere Docker. Construye en Ubuntu 22.04 (glibc antigua = portable):
 
 ```sh
 packaging/build-appimage.sh
-# → dist/EMVy_Controller-0.5.0-beta-x86_64.AppImage
+# → dist/EMVy_Controller-0.6.0-beta-x86_64.AppImage
 chmod +x dist/*.AppImage
-./dist/EMVy_Controller-0.5.0-beta-x86_64.AppImage
+./dist/EMVy_Controller-0.6.0-beta-x86_64.AppImage
 ```
 
 ### Requisitos en el equipo destino (no se pueden empaquetar)
@@ -64,5 +64,5 @@ PySide6 bajo Wine puede fallar; si es tu caso, usa la Opción A.
 
 ## Versión
 
-`emvy/__init__.py` define `__version__` (0.5.0) y `__release__` ("BETA"), que se
+`emvy/__init__.py` define `__version__` (0.6.0) y `__release__` ("BETA"), que se
 muestran en el título de la ventana y en Inicio (GUI/TUI).

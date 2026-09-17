@@ -1,6 +1,6 @@
 [project]
 name = "emvycontroller"
-version = "0.5.0"
+version = "0.6.0"
 description = "Suite funcional de pruebas de seguridad para tarjetas bancarias (chip EMV, NFC, banda magnética, BomberCat) con framework de PoCs"
 readme = "README.md"
 requires-python = ">=3.10"

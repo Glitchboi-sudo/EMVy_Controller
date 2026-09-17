@@ -100,7 +100,7 @@ appimagetool (`Dockerfile.appimage`, `build-appimage.sh` → `dist/EMVy_Controll
 **.exe** (Windows) con la misma spec en Windows/CI, o best-effort con Wine (`Dockerfile.windows`). Incluye
 `firmware/` (código + `.uf2` flasheable, vía `config.repo_root()`); **NO** empaqueta proyectos/capturas
 (viven en XDG `~/.local/share/emvy`) ni `engagements/` (excluidos por `.dockerignore`). La versión
-(`emvy.__version__`=0.5.0, `__release__`="BETA") se muestra en el título de la ventana y en Inicio.
+(`emvy.__version__`=0.6.0, `__release__`="BETA") se muestra en el título de la ventana y en Inicio.
 
 `emvyctl.py` (raíz) es un shim → `emvy.cli:main`. Entry point: `emvyctl = "emvy.cli:main"`.
 
