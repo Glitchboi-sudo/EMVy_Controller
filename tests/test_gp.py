@@ -5,6 +5,7 @@ import pytest
 
 pytest.importorskip("Crypto", reason="requiere el extra [gp] (pycryptodome)")
 
+from emvy.core.apdu import Response
 from emvy.core.gp import crypto
 from emvy.core.gp.keyset import DEFAULT_GP_KEY, Keyset
 from emvy.core.hexutil import from_hex, to_hex
@@ -165,3 +166,109 @@ def test_install_cap_full_flow(tmp_path):
     steps = dict(res.steps)
     assert steps["install-for-load"] == "9000"
     assert steps["install-for-install"] == "9000"
+
+
+# --- escritura inteligente (directa → escalada a canal seguro) --------------
+def test_smart_write_escalates_to_secure_channel():
+    """La escritura directa devuelve 6985; smart_write abre GP y reintenta
+    envuelto (la tarjeta falsa acepta el comando con C-MAC → 9000)."""
+    from emvy.core import cardwrite
+    from emvy.core.gp import content
+
+    class _NeedsSC(_fake("03").__class__):
+        def __call__(self, apdu):
+            b = apdu.to_bytes() if hasattr(apdu, "to_bytes") else bytes(apdu)
+            if b[1] == 0xDC and not (b[0] & 0x04):    # UPDATE RECORD directo
+                return Response(b"", 0x69, 0x85)
+            return super().__call__(apdu)
+
+    k = from_hex(DEFAULT_GP_KEY)
+    card = _NeedsSC(k, k, k, protocol="03")
+    res = content.smart_write(
+        card, lambda s: cardwrite.update_record(s, 1, 1, from_hex("AABB")),
+        keyset=_keyset())
+    assert res.secured and res.protocol == "03" and res.keyset == "k"
+    assert res.response.sw == 0x9000 and card.authenticated
+    assert any("canal seguro" in line.lower() or "SCP" in line for line in res.log)
+
+
+def test_smart_write_direct_success_no_escalation():
+    from emvy.core import cardwrite
+    from emvy.core.gp import content
+    seen = {}
+
+    def send(a):
+        seen["n"] = seen.get("n", 0) + 1
+        return Response(b"", 0x90, 0x00)
+
+    res = content.smart_write(
+        send, lambda s: cardwrite.update_record(s, 1, 1, from_hex("AA")),
+        keyset=_keyset())
+    assert not res.secured and res.response.sw == 0x9000 and seen["n"] == 1
+
+
+# --- GET STATUS con módulos + instanciar un módulo cargado ------------------
+def test_parse_status_extracts_module_aids():
+    from emvy.core.gp.content import _parse_status
+    # E3 realista: 4F(ELF) 9F70(life) 84(mod) 84(mod); longitud interna = 0x1E.
+    raw = from_hex("E31E" "4F06A00000000310" "9F700101"
+                   "8407A0000000031056" "8407A000000003104D")
+    infos = _parse_status(raw)
+    assert len(infos) == 1
+    assert infos[0].aid == "A00000000310"
+    assert infos[0].modules == ("A0000000031056", "A000000003104D")
+
+
+def test_install_instance_over_secure_channel():
+    from emvy.core.gp import content
+    card = _fake("03")
+    chan = content.authenticate(card, _keyset())
+    r = content.install_instance(
+        chan, from_hex("A00000000310"), from_hex("A0000000031056"),
+        from_hex("A0000000031010"))
+    assert r.sw == 0x9000
+
+
+def test_install_instance_not_selectable_uses_p1_04(monkeypatch):
+    from emvy.core.gp import apdu as gpapdu
+    from emvy.core.gp import content
+    card = _fake("02")
+    chan = content.authenticate(card, _keyset())
+    seen = {}
+    real = chan.send
+    def spy(apdu):
+        if apdu.ins == 0xE6:
+            seen["p1"] = apdu.p1
+        return real(apdu)
+    chan.send = spy
+    content.install_instance(chan, from_hex("A00000000310"),
+                             from_hex("A0000000031056"), from_hex("A0000000031010"),
+                             make_selectable=False)
+    assert seen["p1"] == 0x04           # sin 'make selectable' (0x0C)
+
+
+# --- restaurar a 'virgen' (borrar instancias, conservar ISD/SD) -------------
+def test_restore_virgin_keeps_isd_sd_and_keeplist(monkeypatch):
+    from emvy.core.gp import apdu as gpapdu
+    from emvy.core.gp import content
+    from emvy.core.gp.content import AppInfo
+    deleted = []
+
+    def fake_status(chan, p1):
+        if p1 == gpapdu.STATUS_ISD:
+            return [AppInfo("A000000151000000", "LOADED", "9AFE80")]
+        if p1 == gpapdu.STATUS_APPS:
+            return [AppInfo("A000000151000000", "LOADED", "9AFE80"),   # ISD → keep
+                    AppInfo("A0000000031010", "SELECTABLE", "000000"),  # instancia → borrar
+                    AppInfo("A0000000041020", "SELECTABLE", "000000"),  # keep_aids → keep
+                    AppInfo("A0000000995353", "SELECTABLE", "800000")]  # SD (0x80) → keep
+        return []
+
+    monkeypatch.setattr(content, "get_status", fake_status)
+    monkeypatch.setattr(content, "delete",
+                        lambda chan, aid, related=True: deleted.append(to_hex(aid).upper()))
+    res = content.restore_virgin(None, keep_aids=["A0000000041020"])
+    assert deleted == ["A0000000031010"]                    # solo la instancia normal
+    assert res.deleted == ["A0000000031010"]
+    for keep in ("A000000151000000", "A0000000041020", "A0000000995353"):
+        assert keep in res.kept

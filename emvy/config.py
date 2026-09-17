@@ -17,8 +17,29 @@ def _xdg(env: str, default: Path) -> Path:
     return Path(val) if val else default
 
 
+# Override en runtime del directorio de datos (lo fija `settings.apply()` desde
+# la preferencia del usuario). Tiene prioridad sobre XDG; `EMVY_DATA_HOME` (env)
+# sirve para lo mismo sin tocar los ajustes. Ambos apuntan a la carpeta de datos
+# **completa** (la que contiene `projects/`), no a la base XDG.
+_DATA_OVERRIDE: Path | None = None
+
+
+def set_data_home(path: "str | Path | None") -> None:
+    """Fija (o limpia con None) el directorio de datos usado por toda la app."""
+    global _DATA_OVERRIDE
+    _DATA_OVERRIDE = Path(path).expanduser() if path else None
+
+
 def data_home() -> Path:
-    """Directorio de datos (proyectos, capturas). Respeta XDG_DATA_HOME."""
+    """Directorio de datos (proyectos, capturas).
+
+    Prioridad: override de ajustes > `EMVY_DATA_HOME` (env) > `XDG_DATA_HOME`/emvy.
+    """
+    if _DATA_OVERRIDE is not None:
+        return _DATA_OVERRIDE
+    env = os.environ.get("EMVY_DATA_HOME")
+    if env:
+        return Path(env).expanduser()
     base = _xdg("XDG_DATA_HOME", Path.home() / ".local" / "share")
     return base / APP_NAME
 

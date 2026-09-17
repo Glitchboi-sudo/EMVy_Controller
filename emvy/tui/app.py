@@ -14,24 +14,32 @@ from textual.binding import Binding
 from textual.theme import Theme
 from textual.widgets import Footer, Header, TabbedContent, TabPane
 
-# Tema oscuro profesional "slate/OLED + run green" (mismo sistema visual que la
-# GUI: emvy/gui/theme.py). Recolorea todos los tokens $primary/$accent/$panel…
-EMVY_THEME = Theme(
-    name="emvy",
-    primary="#334155",      # estructura/bordes (slate-700)
-    secondary="#1E293B",
-    accent="#22C55E",       # acción/acento (green-500)
-    foreground="#F8FAFC",
-    background="#0B1220",    # fondo profundo
-    surface="#0F172A",       # base de pantallas
-    panel="#1B2336",         # paneles/cabeceras
-    success="#22C55E",
-    warning="#F59E0B",
-    error="#EF4444",
-    dark=True,
-)
+from .. import palettes as _palettes
 
-from .. import __release__, __version__
+
+def _theme_from_palette(name: str, pal: dict) -> Theme:
+    """Construye un `textual.theme.Theme` desde una paleta compartida
+    (`emvy.palettes`), el mismo sistema visual que viste la GUI."""
+    return Theme(
+        name=name,
+        primary=pal["border"],
+        secondary=pal["surface2"],
+        accent=pal["accent"],
+        foreground=pal["text"],
+        background=pal["bg_deep"],
+        surface=pal["bg"],
+        panel=pal["panel"],
+        success=pal["accent"],
+        warning=pal["warning"],
+        error=pal["error"],
+        dark=pal["dark"],
+    )
+
+
+# Tema por defecto (retrocompat): la paleta "emvy" (slate/OLED + run green).
+EMVY_THEME = _theme_from_palette("emvy", _palettes.get("emvy"))
+
+from .. import __release__, __version__, i18n
 from ..core import emv
 from ..core.hexutil import from_hex, to_hex
 from ..project import env as envmod
@@ -50,6 +58,7 @@ from .screens.iso8583 import Iso8583Screen
 from .screens.pocs import PocScreen
 from .screens.projects import ProjectsScreen
 from .screens.readers import ReadersScreen
+from .screens.settings import SettingsScreen
 from .screens.tools import ToolsScreen
 from .screens.variables import VariablesScreen
 from .widgets.common import StatusBar
@@ -126,6 +135,7 @@ class EmvyApp(App):
         Binding("8", "tool('tool-iso')", "ISO 8583", show=False),
         Binding("w", "tool('tool-write')", "Escritura", show=False),
         Binding("u", "show('tab-fuzz')", "Fuzzing", show=False),
+        Binding("comma", "show('tab-set')", "Ajustes", show=False),
     ]
 
     def __init__(self) -> None:
@@ -138,7 +148,12 @@ class EmvyApp(App):
         self.intercept_active: bool = False
         import threading
         self._emu_stop = threading.Event()   # señal para detener la emulación NDEF
-        self.register_theme(EMVY_THEME)      # tema visual profesional (ver EMVY_THEME)
+        # ajustes globales (idioma/carpeta de datos) antes de componer la UI, para
+        # que los textos i18n de compose salgan ya en el idioma elegido.
+        from .. import settings as settingsmod
+        self._prefs = settingsmod.apply(settingsmod.load())
+        for _name, _ in _palettes.names():   # registra todas las paletas como temas
+            self.register_theme(_theme_from_palette(_name, _palettes.get(_name)))
 
     # -- interceptor de APDUs (Burp para EMV) ------------------------------
     def active_send(self):
@@ -165,33 +180,36 @@ class EmvyApp(App):
     def compose(self) -> ComposeResult:
         yield Header()
         with TabbedContent(initial="tab-home", id="main-tabs"):
-            with TabPane("Inicio", id="tab-home"):
+            with TabPane(i18n.t("nav.home"), id="tab-home"):
                 yield DashboardScreen(id="screen-dashboard")
-            with TabPane("Proyectos", id="tab-proj"):
+            with TabPane(i18n.t("nav.projects"), id="tab-proj"):
                 yield ProjectsScreen(id="screen-projects")
-            with TabPane("Variables", id="tab-vars"):
+            with TabPane(i18n.t("nav.variables"), id="tab-vars"):
                 yield VariablesScreen(id="screen-variables")
-            with TabPane("Lectores", id="tab-rdr"):
+            with TabPane(i18n.t("nav.readers"), id="tab-rdr"):
                 yield ReadersScreen(id="screen-readers")
-            with TabPane("Explorador", id="tab-exp"):
+            with TabPane(i18n.t("nav.explorer"), id="tab-exp"):
                 yield ExplorerScreen(id="screen-explorer")
-            with TabPane("Consola", id="tab-con"):
+            with TabPane(i18n.t("nav.tools"), id="tab-con"):
                 yield ToolsScreen(id="screen-tools")
-            with TabPane("Cobros", id="tab-cob"):
+            with TabPane(i18n.t("nav.charges"), id="tab-cob"):
                 yield ChargesScreen(id="screen-charges")
-            with TabPane("PoC", id="tab-poc"):
+            with TabPane(i18n.t("nav.poc"), id="tab-poc"):
                 yield PocScreen(id="screen-pocs")
-            with TabPane("Intercept", id="tab-int"):
+            with TabPane(i18n.t("nav.intercept"), id="tab-int"):
                 yield InterceptScreen(id="screen-intercept")
-            with TabPane("BomberCat", id="tab-bc"):
+            with TabPane(i18n.t("nav.firmware"), id="tab-bc"):
                 yield BombercatScreen(id="screen-firmware")
-            with TabPane("Fuzzing", id="tab-fuzz"):
+            with TabPane(i18n.t("nav.fuzzing"), id="tab-fuzz"):
                 yield FuzzScreen(id="screen-fuzz")
+            with TabPane(i18n.t("nav.settings"), id="tab-set"):
+                yield SettingsScreen(id="screen-settings")
         yield StatusBar()
         yield Footer()
 
     def on_mount(self) -> None:
-        self.theme = "emvy"      # aplica el tema profesional
+        # el nombre de la paleta coincide con el del tema registrado
+        self.theme = self._prefs.theme if self._prefs.theme in _palettes.PALETTES else "emvy"
         self.update_status()
 
     # -- navegación / refresco ---------------------------------------------
@@ -534,34 +552,51 @@ class EmvyApp(App):
     # -- Escritura en tarjeta (hilo de trabajo) ----------------------------
     @work(thread=True, exclusive=True, group="card")
     def write_card_ui(self, op: str, params: dict) -> None:
+        """Escritura **inteligente**: directa y, si la tarjeta exige canal seguro
+        (6982/6985), autentica sola por GlobalPlatform con el keyset elegido y
+        reintenta. `params` puede traer `keyset` (nombre) y `enc`."""
         from ..core import cardwrite
+        from ..core.gp import content
+        from ..core.gp.scp import SEC_CENC, SEC_CMAC
         if not (self.reader and self.reader.transceive):
             self.call_from_thread(self.notify, "Conecta un lector de chip/NFC primero.",
                                   severity="warning")
             return
         send = self.active_send()
-        try:
-            data = params["data"]
+        data = params["data"]
+        ks = None
+        if params.get("keyset"):
+            proj = store.active_project()
+            ks = store.get_keyset(proj, params["keyset"]) if proj else None
+
+        def write_fn(s):
             if op == "record":
-                resp = cardwrite.update_record(send, params["sfi"], params["record"], data)
-            elif op == "binary":
-                resp = cardwrite.update_binary(send, params["offset"], data, sfi=params.get("sfi"))
-            elif op == "data":
-                resp = cardwrite.put_data(send, params["tag"], data)
-            elif op == "append":
-                resp = cardwrite.append_record(send, params["sfi"], data)
-            else:
-                return
+                return cardwrite.update_record(s, params["sfi"], params["record"], data)
+            if op == "binary":
+                return cardwrite.update_binary(s, params["offset"], data, sfi=params.get("sfi"))
+            if op == "data":
+                return cardwrite.put_data(s, params["tag"], data)
+            if op == "append":
+                return cardwrite.append_record(s, params["sfi"], data)
+            raise ValueError(op)
+
+        try:
+            res = content.smart_write(
+                send, write_fn, keyset=ks,
+                security_level=SEC_CENC if params.get("enc") else SEC_CMAC)
         except Exception as e:  # noqa: BLE001
             self.call_from_thread(self.notify, f"Escritura: {e}", severity="error")
             return
-        self.call_from_thread(self._on_write, op, resp)
+        self.call_from_thread(self._on_write, op, res)
 
-    def _on_write(self, op: str, resp) -> None:
+    def _on_write(self, op: str, res) -> None:
         # write_card_ui() lo usan tanto la pestaña Escritura como Fuzzing.
         for sid in ("#screen-write", "#screen-fuzz"):
             try:
-                self.query_one(sid).log_write(op, resp)
+                screen = self.query_one(sid)
+                if res.log and hasattr(screen, "log_lines"):
+                    screen.log_lines(res.log)
+                screen.log_write(op, res.response)
             except Exception:
                 pass
 
@@ -592,11 +627,26 @@ class EmvyApp(App):
                 for key, label in (("isd", "ISD"), ("apps", "Apps/SD"),
                                    ("load_files", "Paquetes")):
                     lines.append(f"[b]── {label} ──[/]")
-                    lines += [f"  {a.aid}  {a.lifecycle}  {a.privileges}" for a in inv[key]] \
-                        or ["  [dim](ninguno)[/]"]
+                    if not inv[key]:
+                        lines.append("  [dim](ninguno)[/]")
+                    for a in inv[key]:
+                        lines.append(f"  {a.aid}  {a.lifecycle}  {a.privileges}")
+                        lines += [f"      [cyan]└ módulo {m}[/]" for m in a.modules]
             elif action == "delete":
                 content.delete(chan, from_hex(kw["aid"]), related=True)
                 lines.append(f"DELETE {kw['aid']} OK")
+            elif action == "wipe":
+                res = content.restore_virgin(
+                    chan, keep_aids=kw.get("keep", ()),
+                    delete_packages=kw.get("packages", False))
+                lines += [f"[green]{m}[/]" if "Virgen" in m else m for m in res.log]
+            elif action == "instantiate":
+                content.install_instance(
+                    chan, from_hex(kw["package"]), from_hex(kw["module"]),
+                    from_hex(kw["instance"]),
+                    make_selectable=not kw.get("no_selectable", False))
+                lines.append(f"[green]Instancia creada: {kw['instance']} "
+                             f"(módulo {kw['module']})[/]")
             elif action == "install":
                 capf = capmod.parse_cap(kw["cap"])
                 lines.append(f"CAP: paquete {capf.package_aid_hex}")

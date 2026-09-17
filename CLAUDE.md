@@ -34,15 +34,15 @@ emvy/
 │   ├── emv.py       flujo EMV sobre un `send`: discover/select/GPO/AFL/records/GET DATA
 │   ├── rawscan.py   escaneo CRUDO (cualquier ISO 7816): SELECT por RID parcial + AIDs, READ RECORD, GET DATA, READ BINARY; read_type4_ndef() lee un tag NFC Forum Type 4 (NDEF) siguiendo la spec (SELECT AID→CC→fichero NDEF)
 │   ├── ndef.py      NDEF puro: parse_records() (Texto/URI/MIME…), find_ndef_tlv() (TLV 0x03 en CC/fichero NDEF), summarize()
-│   ├── cardwrite.py ESCRITURA en tarjeta: UPDATE RECORD/BINARY, PUT DATA, APPEND RECORD + write_status()
-│   ├── cardfuzz.py  plantillas para PROBAR terminales/POS: pistas mutadas (magspoof) + registros EMV mutados (para escribir)
+│   ├── cardwrite.py ESCRITURA en tarjeta: UPDATE RECORD/BINARY, PUT DATA, APPEND RECORD + write_status() + write_hint() (pista accionable en llano por SW)
+│   ├── cardfuzz.py  plantillas para PROBAR terminales/POS: pistas mutadas (magspoof) + registros EMV mutados (para escribir) + personalize_record() (registro '70' amistoso PAN/caducidad/titular→5A/57/5F24/5F20, base de la personalización rápida de Escritura) + TEST_RECORD
 │   ├── emvbits.py   decodificadores de bits: AIP/AUC/TTQ (Flag name/is_set)
 │   ├── cvm.py       CVM List (8E) → reglas + notas de riesgo (No CVM/PIN claro/firma)
 │   ├── oda.py       ODA: inventario, claves débiles y recuperación/verificación RSA del cert. del emisor
 │   ├── analyze.py   assess(tlvs) → informe combinado (AIP/CVM/ODA) + hallazgos + summary()
 │   ├── intercept.py motor de reglas MITM (reescribe tag/valor, set-sw) + intercepting(send,rules)
 │   ├── search.py    Blob/Hit + búsqueda de flags/regex
-│   └── gp/          GlobalPlatform (extra [gp]=pycryptodome): keyset (modelo Keyset), crypto (SCP02 3DES / SCP03 AES: derivación, criptogramas, KDF, retail-MAC, ICV), apdu (comandos GP), scp (Secure Channel sobre Transceiver + wrap C-MAC/C-ENC, autodetección), cap (parseo CAP→Load File Data Block), content (authenticate/get_status/delete/install_cap). Escribir/gestionar JavaCards
+│   └── gp/          GlobalPlatform (extra [gp]=pycryptodome): keyset (modelo Keyset), crypto (SCP02 3DES / SCP03 AES: derivación, criptogramas, KDF, retail-MAC, ICV), apdu (comandos GP), scp (Secure Channel sobre Transceiver + wrap C-MAC/C-ENC, autodetección), cap (parseo CAP→Load File Data Block), content (authenticate/get_status [AppInfo.modules = AIDs de módulos instanciables, tag 84]/list_modules/delete/**restore_virgin** [deja la tarjeta 'virgen': borra instancias que no sean ISD/SD/keep_aids; opcional delete_packages]/install_cap [carga+instancia un CAP EMV abierto] + **install_instance** [instancia un módulo YA cargado: INSTALL [for install] — "inicializar" la tarjeta sin cargar código] + **smart_write**: escritura inteligente — prueba la escritura directa y, si la tarjeta exige canal seguro [SW 6982/6985], abre GP con un keyset y reintenta la escritura envuelta; devuelve `SmartWriteResult` con log del proceso). Escribir/gestionar JavaCards
 ├── readers/     ── EFECTOS: transporte hacia el hardware (aísla pyscard/nfcpy/evdev/pyserial)
 │   ├── types.py     Transceiver, OpenReader, DeviceInfo, Capability, ReaderError, WireEvent (traza de transporte de bajo nivel)
 │   ├── registry.py  descubrimiento unificado + open_device(on_event,on_wire) + resolve()
@@ -77,10 +77,22 @@ emvy/
 │   ├── app.py       MainWindow: estado de sesión + orquestación de hardware por señales Qt; run_gui()
 │   ├── worker.py    submit()/Worker(QRunnable): operaciones de hardware fuera del hilo GUI, con progreso por señales (mantiene vivos los workers en `_ACTIVE` + `setAutoDelete(False)`: si no, el pool los auto-borra y las señales `result`/`error` en cola se pierden)
 │   └── panels/      dashboard, projects, variables, readers, explorer (árbol TLV + inspector), tools (Flags/ISO8583/Escritura), charges (Cobros), poc, intercept, firmware (BomberCat), fuzz (emulación: Fuente decide NFC-NDEF [plantilla/tarjeta-de-prueba/captura] o EMV [perfilar terminal]), console (consola cruda: TX/RX completo + Exportar/Guardar en proyecto)
-├── cli.py       ── CLI (argparse) sobre todo lo anterior
-├── config.py    ── rutas XDG (datos/config); repo_root() = sys._MEIPASS al empaquetar (PyInstaller)
+├── cli.py       ── CLI (argparse) sobre todo lo anterior; main() aplica settings al arrancar
+├── config.py    ── rutas XDG (datos/config); data_home() honra override de ajustes/EMVY_DATA_HOME; repo_root() = sys._MEIPASS al empaquetar (PyInstaller)
+├── settings.py  ── PREFERENCIAS globales (tema/idioma/carpeta de datos) → <config>/settings.json; apply() empuja data_dir a config y idioma a i18n
+├── palettes.py  ── PALETAS de color con nombre (EMVy, Tokyo Night, Gruvbox, Nord, Catppuccin, Dracula, Solarized, Gruvbox Light) — un solo set de tokens viste GUI (QSS) y TUI (Theme)
+├── i18n.py      ── i18n mínimo t(key): catálogos es/en/pt (fallback es→en→clave); despliegue INCREMENTAL (nav/pestañas/botones/Ajustes migrados)
 └── term.py      ── color ANSI para la CLI (presentación)
 ```
+
+**Ajustes globales / Preferencias** (`emvy/settings.py` + pestaña **Ajustes** en GUI y TUI): tema de color
+(paletas de `palettes.py`, aplicables **en vivo** — la GUI reconstruye el QSS, la TUI cambia el `Theme`
+registrado), **idioma** (es/en/pt vía `i18n.t`; se aplica del todo al reiniciar, en vivo las pestañas/nav) y
+**carpeta de datos** (redirige proyectos/capturas/variables a otra ruta — solo datos nuevos, no mueve los
+existentes; vía `config.set_data_home`). Persisten en `<config>/settings.json`; `settings.apply(load())` corre
+al arrancar CLI/GUI/TUI. Añadir un tema = una entrada en `palettes.PALETTES`; migrar más textos a i18n = usar
+`i18n.t("clave")` y añadir la clave al catálogo. Las etiquetas de pestaña/nav usan **ids estables**
+(`_tab_specs`/`_NAV_GROUPS` por id) desacoplados del texto traducible.
 
 **Empaquetado / distribución** (`packaging/`, ver `packaging/README.md`): binarios **de la GUI** con
 PyInstaller (`EMVyController.spec`, entry `emvy_gui.py`). **AppImage** (Linux) vía Docker Ubuntu 22.04 +
@@ -194,7 +206,25 @@ Frontend **nativo** alternativo a la TUI (para quien prefiere ventana de escrito
 mismo núcleo puro; `emvy/gui/`. **Paridad de pestañas con la TUI**: **Inicio** (estado + proyectos
 recientes + acciones rápidas), **Proyectos**, **Variables** (+perfiles), **Lectores**, **Explorador**
 (capturar → árbol TLV con inspector: copiar hex/ASCII, asignar a variable, guardar captura),
-**Herramientas** (sub-tabs Flags · ISO 8583 · Escritura), **Cobros** (switch ISO 8583), **PoC**
+**Herramientas** (sub-tabs Flags · ISO 8583 · **Escritura**: UX **guiada por intención** —una barra de
+**canal seguro** (keyset + C-ENC) compartida arriba, con hint que dice si se autenticará sola; luego dos
+pestañas (GUI `QTabWidget`, TUI `TabbedContent`) + un log común abajo—: **«Personalizar»** (amistoso, por
+defecto) con **preset** (Visa/Mastercard/Amex de prueba / Personalizado) que rellena PAN/caducidad/titular/
+cód.servicio, **vista previa en vivo** del registro EMV (resumen PAN/Cad/Titular + Track2 + hex, via
+`cardfuzz.personalize_record`), y botones «Datos de prueba», «Copiar hex», «Editar en Avanzado→» (lleva el
+hex a la otra pestaña) y **«Escribir en la tarjeta»** (CTA); y **«Avanzado»** con dos grupos: **Escritura
+directa (APDU)** (op + **campos contextuales** según el op) y **GlobalPlatform · inicializar/gestionar la
+tarjeta** (probar auth · Ver contenido/GET STATUS —lista los **módulos instanciables** de cada paquete— ·
+**Instalar CAP EMV** [`install_cap`] · **Instanciar applet cargado** [paquete/módulo/instancia →
+`install_instance`, INSTALL [for install] de un módulo ya LOADED] · DELETE · **Restaurar (virgen)**
+[`restore_virgin`: borra instancias, conserva ISD/SD/fábrica]). Toda escritura es **inteligente**: prueba
+directo y, si la tarjeta pide canal seguro (6982/6985), **autentica sola por GlobalPlatform** con el keyset y
+reintenta (`content.smart_write`). Flujo de una tarjeta en blanco: (restaurar→virgen) → instalar/instanciar un
+applet EMV → seleccionable → personalizar en «Personalizar». **Ojo**: solo funciona con applets que soporten
+perso por UPDATE RECORD (p.ej. un CAP EMV abierto); los Visa/EMV licenciados de fábrica suelen rechazar
+UPDATE RECORD/PUT DATA (6D00) y exigir perso propietaria (STORE DATA/DGI). El log añade una **pista accionable** por SW vía
+`cardwrite.write_hint()`),
+**Cobros** (switch ISO 8583), **PoC**
 (runner del proyecto), **Intercept** (reglas MITM; `active_send` las envuelve al activar), **BomberCat**
 (compilar/subir firmware con arduino-cli) y **Fuzzing** (banda/EMV/NDEF + emulación). En el carril de
 emulación un **único botón "Emular"** decide **NFC o EMV según la Fuente**: `NFC · plantilla NDEF (fuzz)`,
@@ -405,7 +435,9 @@ with registry.open_device(dev) as r:
 - **Reutiliza**: antes de escribir, busca en `core.hexutil`, `core.tlv`, `core.apdu`, `env`. P.ej.
   serializa TLV con `tlv.encode` (no reconstruyas bytes a mano).
 - **Estilo**: PEP 8, type hints, `snake_case`/`PascalCase`/`UPPER_CASE`, f-strings, `pathlib`,
-  docstrings en funciones públicas. Comentarios y textos de usuario en **español** (consistencia).
+  docstrings en funciones públicas. Comentarios y docstrings en **español** (consistencia). Los **textos de
+  usuario** están en español por defecto pero migrando a **i18n** (`i18n.t("clave")`, catálogos es/en/pt): al
+  tocar una superficie, envuelve sus cadenas con `t()` y añade la clave al catálogo (despliegue incremental).
 - **Textual**: no nombres métodos de widget como `_render`/`render` (colisionan con la API interna);
   usa nombres propios (`_render_hits`, `show_dump`…). El hardware va en `@work(thread=True)` +
   `call_from_thread` para actualizar la UI.

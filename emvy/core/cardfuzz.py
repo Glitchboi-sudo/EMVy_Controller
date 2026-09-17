@@ -15,6 +15,7 @@ from dataclasses import dataclass
 
 from . import ndef as ndefmod
 from . import tlv
+from . import track as tracklib
 from .hexutil import from_hex, to_hex
 
 # ---------------------------------------------------------------------------
@@ -189,6 +190,53 @@ def _track2_bcd(pan: str, expiry: str) -> str:
     yymm = expiry[2:] if len(expiry) == 6 else expiry
     body = f"{pan}D{yymm}201"
     return body if len(body) % 2 == 0 else body + "F"
+
+
+# Valores por defecto de un registro EMV de prueba (tarjeta de laboratorio).
+TEST_RECORD = dict(pan="4111111111111111", name="TEST/CARD",
+                   expiry="2812", service_code="201")
+
+
+def _norm_expiry(expiry: str) -> tuple[str, str]:
+    """Normaliza una caducidad a `(YYMM, YYMMDD)`.
+
+    Acepta `YYMM` (4 díg., se asume día 31) o `YYMMDD` (6 díg.). Devuelve el
+    par que usan, respectivamente, el Track2 (tag 57) y el tag 5F24.
+    """
+    digits = "".join(ch for ch in expiry if ch.isdigit())
+    if len(digits) >= 6:
+        yymmdd = digits[:6]
+        return yymmdd[:4], yymmdd
+    yymm = (digits + "0000")[:4]
+    return yymm, yymm + "31"
+
+
+def personalize_record(pan: str = "4111111111111111", name: str = "TEST/CARD",
+                       expiry: str = "2812", service_code: str = "201") -> bytes:
+    """Construye un registro EMV `70` **personalizado** listo para UPDATE RECORD.
+
+    A partir de campos amistosos (PAN, titular, caducidad `YYMM`/`YYMMDD`, código
+    de servicio) arma los tags 5A/57/5F24/5F20 + un AIP/CVM de referencia. El
+    Track2 (57) se regenera con `core.track.build_track2_emv` (inverso de
+    `parse_track2_emv`), de modo que PAN/caducidad/servicio quedan coherentes en
+    5A, 57 y 5F24. Puro: no toca la tarjeta; el llamador lo escribe con
+    `core.cardwrite.update_record`.
+    """
+    pan = "".join(ch for ch in pan if ch.isdigit()) or TEST_RECORD["pan"]
+    service_code = ("".join(ch for ch in service_code if ch.isdigit()) or "201")[:3]
+    yymm, yymmdd = _norm_expiry(expiry)
+    track2 = tracklib.build_track2_emv(pan, yymm, service_code)
+    pan_bcd = pan if len(pan) % 2 == 0 else pan + "F"
+    tlvs = (
+        ("5A", from_hex(pan_bcd)),
+        ("57", from_hex(track2)),
+        ("5F24", from_hex(yymmdd)),
+        ("5F20", (name or TEST_RECORD["name"]).encode("latin-1")),
+        ("82", from_hex("2000")),                             # AIP: DDA soportado
+        ("8E", from_hex("00000000" "00000000" "4103" "1E03")),  # CVM: PIN online→firma
+    )
+    return tlv.encode_tlv(tlv.TLV(
+        "70", b"", [tlv.tlv(t, v) for t, v in tlvs], constructed=True))
 
 
 def get_emv_template(templates: tuple[EmvTemplate, ...], template_id: str

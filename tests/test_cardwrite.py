@@ -39,3 +39,11 @@ def test_cardwrite_helpers_send():
     assert seen["apdu"].ins == 0xDC and r.sw == 0x9000
     cardwrite.put_data(send, 0x9F36, from_hex("0001"))
     assert seen["apdu"].ins == 0xDA
+
+
+def test_write_hint_actionable():
+    assert cardwrite.write_hint(0x9000) is None
+    for sw in (0x6982, 0x6985):
+        assert "GlobalPlatform" in cardwrite.write_hint(sw)
+    assert "SFI/registro" in cardwrite.write_hint(0x6A82)
+    assert cardwrite.write_hint(0x1234) is None            # SW sin pista específica

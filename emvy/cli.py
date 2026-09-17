@@ -773,10 +773,33 @@ def cmd_gp_op(args) -> int:
                         print(c("  (ninguno)", "grey"))
                     for a in inv[key]:
                         print(f"  {c(a.aid, 'green'):<34} {a.lifecycle:<12} {c(a.privileges, 'grey')}")
+                        for m in a.modules:        # módulos instanciables del paquete
+                            print(f"      {c('└ módulo', 'grey')} {c(m, 'cyan')}  "
+                                  f"{c('(instánciale con gp instantiate)', 'grey')}")
+                return 0
+            if args.gpcmd == "instantiate":
+                r = content.install_instance(
+                    chan, from_hex(args.package), from_hex(args.module),
+                    from_hex(args.instance),
+                    privileges=from_hex(args.priv) if args.priv else b"\x00",
+                    params=from_hex(args.params) if args.params else b"",
+                    make_selectable=not args.no_selectable)
+                print(c(f"INSTALL [for install] OK: instancia {args.instance} "
+                        f"(módulo {args.module}, paquete {args.package}).", "green"))
+                if r.data:
+                    print(c(f"  data: {to_hex(r.data)}", "grey"))
                 return 0
             if args.gpcmd == "delete":
                 content.delete(chan, from_hex(args.aid), related=not args.no_related)
                 print(c(f"DELETE {args.aid} OK.", "green"))
+                return 0
+            if args.gpcmd == "wipe":
+                res = content.restore_virgin(
+                    chan, keep_aids=args.keep or (),
+                    delete_packages=args.packages,
+                    on_line=lambda m: print(c("  " + m, "grey")))
+                print(c(f"Tarjeta virgen: {len(res.deleted)} borrado(s), "
+                        f"{len(res.kept)} conservado(s).", "green"))
                 return 0
             if args.gpcmd == "store-data":
                 resp = chan.send(gpapdu.store_data(from_hex(args.hex)))
@@ -1578,6 +1601,17 @@ def build_parser() -> argparse.ArgumentParser:
     o.add_argument("--params", help="parámetros de instalación en hex (tag C9)")
     o.add_argument("--load-only", action="store_true", help="solo cargar el paquete, sin instanciar")
     o.add_argument("--force", action="store_true", help="borrar el paquete previo si existe")
+    o = _gp_op("instantiate", "instancia un módulo YA cargado (INSTALL [for install])")
+    o.add_argument("package", help="AID del paquete/load file (hex)")
+    o.add_argument("module", help="AID del módulo/applet a instanciar (hex)")
+    o.add_argument("instance", help="AID de la instancia a crear (hex)")
+    o.add_argument("--priv", help="privilegios en hex (por defecto 00)")
+    o.add_argument("--params", help="parámetros de instalación en hex (tag C9)")
+    o.add_argument("--no-selectable", action="store_true", help="instalar sin 'make selectable'")
+    o = _gp_op("wipe", "deja la tarjeta 'virgen': borra instancias (no ISD/SD)")
+    o.add_argument("--keep", action="append", help="AID (hex) a conservar (repetible)")
+    o.add_argument("--packages", action="store_true",
+                   help="borrar también los paquetes (¡puede eliminar applets de fábrica!)")
     o = _gp_op("store-data", "STORE DATA (un bloque)")
     o.add_argument("hex", help="datos en hex")
 
@@ -1676,6 +1710,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv=None) -> int:
+    # aplica preferencias globales (carpeta de datos redirigida, idioma) para que
+    # todos los comandos usen la ubicación de datos elegida por el usuario.
+    from . import settings as _settings
+    _settings.apply(_settings.load())
     started_pcscd = pcscd.ensure_started()
     try:
         args = build_parser().parse_args(argv)
