@@ -14,6 +14,18 @@
  *   Hardware · Escaneo NFC · Identificación de tarjeta
  *   Protocolo EMV · Transacciones · Sondas de seguridad
  *
+ * Plano de control — BomberCatControl Discovery Contract v1.0
+ * (docs/BomberCatControl-Discovery-Contract.md): los comandos de
+ * DESCUBRIMIENTO son conformes al contrato para que cualquier host (CLI del
+ * vendor, GUI/TUI de EMVy) descubra e identifique la placa de forma idéntica:
+ *   ping     (case-insensitive) -> `+OK bombercat`   (§5, handshake)
+ *   info                        -> `:fw_name emvybombercat` `:fw <v>` `+OK` (§6.1)
+ *   identify                    -> `+OK` inmediato + parpadeo LED asíncrono (§6.2)
+ *   <verbo desconocido>         -> `-ERR unknown command <verb>`            (§6.3.3)
+ * Los verbos OPERATIVOS de abajo (WAIT/APDU:/EMU:/…) conservan el dialecto
+ * histórico por retrocompatibilidad con `emvy/readers/bombercat.py` hasta que
+ * el host migre al framing +OK/-ERR (ver README §"Discovery Contract").
+ *
  * Por serie (@115200) expone el mismo dispositivo a **EMVy Controller**
  * (`emvyctl.py`/`emvy`): passthrough de APDU (PING/WAIT/APDU:/RELEASE),
  * lectura EMV (SCAN), tags NFC (TAG), banda magnética (MAG:) y emulación de
@@ -51,6 +63,14 @@ Electroniccats_PN7150 nfc(PN7150_IRQ, PN7150_VEN, PN7150_ADDR, PN7150);
 // transmisión. Ver nota en el handler de WAIT sobre por qué APDU: no puede
 // re-consultar nfc.isTagDetected() directamente.
 static bool gPassthroughActive = false;
+
+// IDENTIFY (contrato de descubrimiento BomberCatControl §6.2): parpadeo de LED
+// ASÍNCRONO — la respuesta `+OK` sale al instante y el LED se bombea desde
+// loop() (identifyPump), sin bloquear jamás el plano de control (§6.2.1).
+static bool          gIdentifyActive     = false;
+static unsigned long gIdentifyUntil      = 0;
+static unsigned long gIdentifyLastToggle = 0;
+static bool          gIdentifyLedOn      = false;
 
 // Emulación NDEF (comando EMU:): el BomberCat se hace pasar por un tag NFC
 // Forum Type 4 sirviendo un mensaje NDEF arbitrario (posiblemente malformado,
@@ -1899,9 +1919,34 @@ void emvyTagsRead();
 void emvyMagInit();
 void emvyMagPlay(const char *track1, const char *track2);
 
+// Bombea el parpadeo del LED de IDENTIFY (contrato §6.2): asíncrono, se llama
+// desde loop(); apaga el LED al vencer la ventana. No bloquea nada.
+static void identifyPump() {
+  unsigned long now = millis();
+  if ((long)(now - gIdentifyUntil) >= 0) {
+    gIdentifyActive = false;
+    gIdentifyLedOn  = false;
+#ifdef LED_BUILTIN
+    digitalWrite(LED_BUILTIN, LOW);
+#endif
+    return;
+  }
+  if (now - gIdentifyLastToggle >= 150) {
+    gIdentifyLastToggle = now;
+    gIdentifyLedOn = !gIdentifyLedOn;
+#ifdef LED_BUILTIN
+    digitalWrite(LED_BUILTIN, gIdentifyLedOn ? HIGH : LOW);
+#endif
+  }
+}
+
 void setup() {
   Serial.begin(115200);
   delay(800);
+#ifdef LED_BUILTIN
+  pinMode(LED_BUILTIN, OUTPUT);
+  digitalWrite(LED_BUILTIN, LOW);
+#endif
   if(WiFi.status()==WL_NO_MODULE){Serial.println("# ERROR: WiFi no encontrado");while(true)delay(1000);}
   if(WiFi.beginAP(AP_SSID,AP_PASS)!=WL_AP_LISTENING){Serial.println("# ERROR: AP fallo");while(true)delay(1000);}
   server.begin();
@@ -2349,13 +2394,40 @@ static void handleSerialCmd(const String &cmd) {
   String up = c; up.toUpperCase();
 
   // -------------------------------------------------------------------------
-  // Passthrough de APDU (para EMVyController: `emvy -r bombercat ...`)
-  //   PING            -> PONG
-  //   WAIT [ms]       -> READY:  (hay tarjeta ISO-DEP)  | ERR:NOCARD
-  //   APDU:<hex>      -> RESP:<hex+SW>  | ERR:...
-  //   RELEASE         -> OK   (libera la tarjeta y reanuda discovery)
+  // Plano de control — BomberCatControl Discovery Contract v1.0
+  //   ping/info/identify son los comandos de DESCUBRIMIENTO que TODO firmware
+  //   BomberCat DEBE implementar para que cualquier host conforme (CLI vendor,
+  //   GUI/TUI de EMVy) lo descubra e identifique de forma idéntica. El verbo se
+  //   compara sobre `up` (mayúsculas) => es case-insensitive (§5.1: ping/PING/
+  //   Ping producen la MISMA respuesta). El resto de verbos operativos
+  //   (WAIT/APDU:/RESP:/EMU:/…) conservan el dialecto histórico por
+  //   retrocompatibilidad con `emvy/readers/bombercat.py` (ver README §Contrato).
   // -------------------------------------------------------------------------
-  if (up == "PING") { Serial.println("PONG"); return; }
+  // ping (§5): handshake de descubrimiento. Respuesta: `+OK bombercat` (el host
+  // valida `ok AND "bombercat" in message`). Sin data lines, un solo terminador.
+  if (up == "PING") { Serial.println("+OK bombercat"); return; }
+
+  // info (§6.1): snapshot legible por máquina. `fw_name` es el slug estable de
+  // esta imagen — deja que el host la identifique sin adivinar por el banner.
+  // Read-only: no cambia estado.
+  if (up == "INFO") {
+    Serial.println(":fw_name emvybombercat");
+    Serial.println(":fw " FW_VERSION);
+    Serial.println(":role emv-multitool");
+    Serial.println("+OK");
+    return;
+  }
+
+  // identify (§6.2): permite distinguir físicamente una placa entre varias.
+  // Devuelve el terminador de INMEDIATO; el parpadeo (~2 s) corre asíncrono en
+  // loop() y NUNCA bloquea el plano de control. Idempotente, no destructivo.
+  if (up == "IDENTIFY") {
+    gIdentifyActive     = true;
+    gIdentifyUntil      = millis() + 2000;
+    gIdentifyLastToggle = 0;
+    Serial.println("+OK");
+    return;
+  }
 
   // REBOOT / RESET — reinicio completo del MCU (RP2040). Útil desde la GUI/TUI
   // para salir de un estado atascado (p.ej. emulación colgada) sin desconectar
@@ -2541,7 +2613,15 @@ static void handleSerialCmd(const String &cmd) {
   // -------------------------------------------------------------------------
   // SCAN <centavos>: flujo EMV completo -> JSON_START/END (comportamiento previo)
   // -------------------------------------------------------------------------
-  if (!up.startsWith("SCAN")) return;
+  if (!up.startsWith("SCAN")) {
+    // Contrato §6.3.3 / C-11: un verbo desconocido DEBE responder
+    // `-ERR unknown command <verb>` — nunca quedarse en silencio (obligaría al
+    // host a agotar su deadline) ni emitir un `+OK` pelado.
+    int sp0 = c.indexOf(' ');
+    String verb = (sp0 >= 0) ? c.substring(0, sp0) : c;
+    Serial.print("-ERR unknown command "); Serial.println(verb);
+    return;
+  }
 
   int sp = up.indexOf(' ');
   uint64_t amt = (sp >= 0) ? (uint64_t)c.substring(sp + 1).toInt() : 500;
@@ -2593,4 +2673,7 @@ void loop() {
   // Emulación NDEF observable: se bombea aquí para que sea cancelable (STOP/
   // REBOOT se leen entre pumps) y no un bloqueo de 30 s.
   if (gEmuActive) emuPump();
+
+  // Parpadeo asíncrono de IDENTIFY (contrato §6.2): no bloquea el plano de control.
+  if (gIdentifyActive) identifyPump();
 }

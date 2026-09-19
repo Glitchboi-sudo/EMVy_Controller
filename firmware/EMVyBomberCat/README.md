@@ -8,8 +8,9 @@ todo manejable por **serie** desde EMVyController.
 
 | Comando serie              | Modo   | Qué hace                                              |
 |----------------------------|--------|------------------------------------------------------|
+| `ping` / `info` / `identify` | control | Descubrimiento (Discovery Contract) → `+OK bombercat` / `:fw_name…+OK` / `+OK`+LED |
 | `SCAN <centavos>`          | EMV    | Flujo EMV contactless → `JSON_START/…/JSON_END`      |
-| `PING` / `WAIT [ms]`       | APDU   | Handshake / espera tarjeta ISO-DEP (`READY:`)        |
+| `WAIT [ms]`                | APDU   | Espera tarjeta ISO-DEP (`READY:` / `ERR:NOCARD`)     |
 | `APDU:<hex>` / `RELEASE`   | APDU   | Passthrough de APDU (`RESP:<hex+SW>`)                |
 | `TAG` / `TAGS`             | TAGS   | Lee un tag NFC → `TAG:<proto> TECH:<t> UID:<hex>`    |
 | `MAG:<track1>\|<track2>`   | MAG    | Emula un swipe de banda magnética (magspoof) → `OK`  |
@@ -57,6 +58,34 @@ Desde EMVy — interacción **directa** con el firmware (mismo `Transceiver` que
 - `emvy bombercat reboot` (reinicia la placa; reconecta el lector después)
 
 Todos aceptan `--port /dev/ttyACMx` para fijar el puerto si hay más de un dispositivo serie.
+
+## Discovery Contract (plano de control conforme)
+
+Este firmware implementa el **BomberCatControl Discovery Contract v1.0**
+(`docs/BomberCatControl-Discovery-Contract.md`, normativo) en su **plano de control**,
+para que cualquier host conforme —el CLI de `bombercat-tools`, la GUI y la TUI de EMVy—
+lo descubra e identifique de forma **idéntica**:
+
+| Estímulo (host→device) | Respuesta (device→host)                    | Cláusula |
+|------------------------|--------------------------------------------|----------|
+| `ping` (o `PING`/`Ping`) | `+OK bombercat`  (sin data lines)        | §5, C-6/C-7 |
+| `info`                 | `:fw_name emvybombercat` · `:fw <v>` · `:role emv-multitool` · `+OK` | §6.1, C-8 |
+| `identify`             | `+OK` inmediato + parpadeo de LED asíncrono (~2 s) | §6.2, C-9 |
+| `<verbo desconocido>`  | `-ERR unknown command <verb>`              | §6.3.3, C-11 |
+
+- El verbo es **case-insensitive** (el dispatcher compara en mayúsculas), así que
+  `ping`/`PING`/`Ping` producen la misma respuesta (§5.1) — esto reconcilia el `PING`
+  (mayúsculas) del reader de EMVy con el `ping` (minúsculas) del CLI del vendor.
+- El parpadeo de `identify` **no bloquea** el plano de control: la respuesta `+OK` sale
+  al instante y el LED se bombea desde `loop()` (`identifyPump`, §6.2.1).
+
+**Desviación conocida (transitoria).** Los verbos **operativos** (`WAIT`/`APDU:`→`RESP:`,
+`SCAN`→`JSON_*`, `EMU:`/`EMUEMV`→`EMU:*`, `MAG:`/`RELEASE`/`STOP`→`OK`) conservan el
+**dialecto histórico** en vez del framing `+OK`/`-ERR` del contrato (§2.7/§3), por
+retrocompatibilidad con `emvy/readers/bombercat.py`, que aún habla ese dialecto. Migrarlos
+al framing del contrato es **Fase 2** y depende de que el host se actualice primero (PR en
+curso). El descubrimiento (ping/info/identify/verbo-desconocido) —lo que hace que la placa
+aparezca con ✓ en `device list`— ya es conforme.
 
 ## Estructura (sketch multi-archivo — Arduino concatena los .ino)
 
