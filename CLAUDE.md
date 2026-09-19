@@ -716,18 +716,21 @@ tener que activarlo antes; se activa por ruta (`set_active_path`) y no se borra 
 **bombercat-tools** (Electronic Cats, v1.2.0.0) es el framework oficial que controla el BomberCat y
 flashea firmwares `.uf2` prebuilt (release `ElectronicCats/bombercat-firmware`, v1.2.0.0: NFCGate,
 DetectTags, DetectReaders, magspoof, WiFiWebServer…). Está como **submódulo git** en
-`vendor/bombercat-tools/` (`git submodule update --init`; `.gitmodules`), fijado al commit
-`c636721` (v1.2.0.0 + `setup-env`, aún sin tag: es HEAD de `feature/packaging`/PR#3 — re-pinear a un
-tag cuando lo publiquen). Usa su **propio venv aislado** en `vendor/bombercat-tools/.venv` (deps con
-pines propios, no el venv de EMVy). CI lo inicializa con `submodules: recursive`.
+`vendor/bombercat-tools/` (`git submodule update --init`; `.gitmodules`), fijado al tag **`v1.3.0`**
+(`dbc8ab3`, en rama `Test`; en `main` estaba en `c636721` = v1.2.0.0 + `setup-env`). Usa su **propio
+venv aislado** en `vendor/bombercat-tools/.venv` (deps con pines propios, no el venv de EMVy). CI lo
+inicializa con `submodules: recursive`.
 
-> **Operar firmwares oficiales (rama `Test`) requiere el vendor en v1.3.0.** Los paneles GUI
+> **Operar firmwares oficiales (rama `Test`) usa el vendor en v1.3.0.** Los paneles GUI
 > `TagsPanel`/`ReadersPanel`/`MagspoofPanel`/`MifarePanel`/`RelayPanel` (ADR-001) y sus helpers
 > del orquestador (`status_json`/`identify`/`tags mifare`/`magspoof`/`relay`/`capture`) usan
-> subcomandos que **aparecen en v1.3.0** del framework. El submódulo sigue clavado a v1.2.0.0; para
-> operar hardware real, sube el pin (`git -C vendor/bombercat-tools checkout v1.3.0 && git submodule
-> update`). Los helpers **degradan limpio** (`BombercatToolsError`) si el subcomando no existe, y los
-> tests los cubren offline (monkeypatch de `run_capture`/`run_json`), así que la suite pasa sin bumpear.
+> subcomandos que **aparecen en v1.3.0** del framework — por eso `Test` sube el pin del submódulo a
+> ese tag. Los helpers **degradan limpio** (`BombercatToolsError`) si el subcomando no existe, y los
+> tests los cubren offline (monkeypatch de `run_capture`/`run_json`), así que la suite pasa sin placa.
+> **Ojo — descubrimiento:** el CLI del vendor descubre por el handshake del Discovery Contract
+> (`ping`→`+OK bombercat`); una BomberCat con el firmware **EMVyBomberCat previo** al commit del
+> contrato responde `PONG` y saldría como "presente pero sin REPL". Flashea el EMVyBomberCat
+> actualizado (o una imagen oficial) para que la placa sea descubierta.
 
 - **Adaptador**: `emvy/integrations/bombercat_tools.py` lo maneja por **subprocess** —
   `locate()`/`ensure_venv()` (bootstrap perezoso), `run_passthrough()`, `run_json()` (extrae JSON de
