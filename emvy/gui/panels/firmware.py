@@ -283,12 +283,18 @@ class DevicePanel(BaseFirmwarePanel):
         return box
 
     def on_status(self, st: dict) -> None:
-        self._l_name.setText(st.get("name") or "—")
+        name = (st.get("name") or "").strip()
+        self._l_name.setText(name or "—")
         self._l_ver.setText(st.get("version") or "—")
         self._l_caps.setText(", ".join(self.caps) or "—")
-        detected = (st.get("detected") or "").strip().lower() in ("yes", "sí", "si", "true", "1")
-        self._det_pill.setText("detectada" if detected else (st.get("detected") or "no detectada"))
-        _set_prop(self._det_pill, "pill", "on" if detected else "off")
+        # "identificado" = el vendor pudo nombrar el firmware (no UNKNOWN). La pill
+        # muestra la etiqueta de confianza del vendor (p.ej. "handshake (certain)",
+        # "USB id only…") y va verde cuando está identificado, tenue si es
+        # USB-only/desconocido.
+        identified = bool(name) and name.lower() not in ("unknown / none", "—")
+        self._det_pill.setText((st.get("detected") or "").strip()
+                               or ("detectada" if identified else "sin detectar"))
+        _set_prop(self._det_pill, "pill", "on" if identified else "off")
 
     def reload(self) -> None:
         """Recarga los sketches locales (sección dev). No toca el venv del vendor."""
