@@ -76,7 +76,7 @@ emvy/
 ├── gui/         ── interfaz GUI de escritorio (PySide6/Qt) — frontend nativo alternativo a la TUI
 │   ├── app.py       MainWindow: estado de sesión + orquestación de hardware por señales Qt; run_gui()
 │   ├── worker.py    submit()/Worker(QRunnable): operaciones de hardware fuera del hilo GUI, con progreso por señales (mantiene vivos los workers en `_ACTIVE` + `setAutoDelete(False)`: si no, el pool los auto-borra y las señales `result`/`error` en cola se pierden)
-│   └── panels/      dashboard, projects, variables, readers, explorer (árbol TLV + inspector), tools (Flags/ISO8583/Escritura), charges (Cobros), poc, intercept, firmware (BomberCat), fuzz (emulación: Fuente decide NFC-NDEF [plantilla/tarjeta-de-prueba/captura] o EMV [perfilar terminal]), console (consola cruda: TX/RX completo + Exportar/Guardar en proyecto)
+│   └── panels/      dashboard, projects, variables, readers, explorer (árbol TLV + inspector), tools (Flags/ISO8583/Escritura), charges (Cobros), poc, intercept, firmware (**ADR-001: un Tab por firmware BomberCat** — `DevicePanel` control-plane [estado/flasheo/permisos USB/compilar propio, posee el puerto serie único] + gated por capacidad `TagsPanel`/`ReadersPanel`/`MagspoofPanel`/`MifarePanel`/`RelayPanel`; `BaseFirmwarePanel` centraliza gating+pill de estado+log; orquestados vía `integrations.bombercat_tools` [subprocess al venv del vendor]), fuzz (emulación: Fuente decide NFC-NDEF [plantilla/tarjeta-de-prueba/captura] o EMV [perfilar terminal]), console (consola cruda: TX/RX completo + Exportar/Guardar en proyecto)
 ├── cli.py       ── CLI (argparse) sobre todo lo anterior; main() aplica settings al arrancar
 ├── config.py    ── rutas XDG (datos/config); data_home() honra override de ajustes/EMVY_DATA_HOME; repo_root() = sys._MEIPASS al empaquetar (PyInstaller)
 ├── settings.py  ── PREFERENCIAS globales (tema/idioma/carpeta de datos) → <config>/settings.json; apply() empuja data_dir a config y idioma a i18n
@@ -720,6 +720,14 @@ DetectTags, DetectReaders, magspoof, WiFiWebServer…). Está como **submódulo 
 `c636721` (v1.2.0.0 + `setup-env`, aún sin tag: es HEAD de `feature/packaging`/PR#3 — re-pinear a un
 tag cuando lo publiquen). Usa su **propio venv aislado** en `vendor/bombercat-tools/.venv` (deps con
 pines propios, no el venv de EMVy). CI lo inicializa con `submodules: recursive`.
+
+> **Operar firmwares oficiales (rama `Test`) requiere el vendor en v1.3.0.** Los paneles GUI
+> `TagsPanel`/`ReadersPanel`/`MagspoofPanel`/`MifarePanel`/`RelayPanel` (ADR-001) y sus helpers
+> del orquestador (`status_json`/`identify`/`tags mifare`/`magspoof`/`relay`/`capture`) usan
+> subcomandos que **aparecen en v1.3.0** del framework. El submódulo sigue clavado a v1.2.0.0; para
+> operar hardware real, sube el pin (`git -C vendor/bombercat-tools checkout v1.3.0 && git submodule
+> update`). Los helpers **degradan limpio** (`BombercatToolsError`) si el subcomando no existe, y los
+> tests los cubren offline (monkeypatch de `run_capture`/`run_json`), así que la suite pasa sin bumpear.
 
 - **Adaptador**: `emvy/integrations/bombercat_tools.py` lo maneja por **subprocess** —
   `locate()`/`ensure_venv()` (bootstrap perezoso), `run_passthrough()`, `run_json()` (extrae JSON de

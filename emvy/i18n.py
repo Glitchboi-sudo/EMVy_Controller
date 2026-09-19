@@ -30,6 +30,13 @@ _CATALOG: dict[str, dict[str, str]] = {
     "nav.poc":        {"es": "PoC",          "en": "PoC",         "pt": "PoC"},
     "nav.intercept":  {"es": "Intercept",    "en": "Intercept",   "pt": "Intercept"},
     "nav.firmware":   {"es": "BomberCat",    "en": "BomberCat",   "pt": "BomberCat"},
+    # -- paneles BomberCat por firmware (ADR-001) -------------------------
+    "nav.device":     {"es": "Dispositivo",  "en": "Device",      "pt": "Dispositivo"},
+    "nav.tags":       {"es": "Tags",         "en": "Tags",        "pt": "Tags"},
+    "nav.readers_fw": {"es": "Readers",      "en": "Readers",     "pt": "Readers"},
+    "nav.magspoof":   {"es": "Magspoof",     "en": "Magspoof",    "pt": "Magspoof"},
+    "nav.mifare":     {"es": "Mifare",       "en": "Mifare",      "pt": "Mifare"},
+    "nav.relay":      {"es": "Relay",        "en": "Relay",       "pt": "Relay"},
     "nav.fuzzing":    {"es": "Fuzzing",      "en": "Fuzzing",     "pt": "Fuzzing"},
     "nav.settings":   {"es": "Ajustes",      "en": "Settings",    "pt": "Ajustes"},
     # -- grupos de la barra lateral (GUI) ---------------------------------

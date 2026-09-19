@@ -73,6 +73,11 @@ class Project:
     def logs_dir(self) -> Path:
         return self.path / "logs"
 
+    @property
+    def artifacts_dir(self) -> Path:
+        """Artefactos varios (dumps Mifare, pcaps de relay…) que no son capturas EMV."""
+        return self.path / "artifacts"
+
     def manifest(self) -> dict:
         return {"name": self.name, "description": self.description,
                 "created": self.created, "reader": self.reader}

@@ -247,7 +247,8 @@ def test_all_tabs(win):
     tabs = win.tabs
     assert win._tab_ids == [
         "home", "projects", "variables", "readers", "explorer", "tools",
-        "charges", "poc", "intercept", "firmware", "fuzzing", "settings"]
+        "charges", "poc", "intercept", "device", "tags", "readers_fw",
+        "magspoof", "mifare", "relay", "fuzzing", "settings"]
     assert [tabs.tabText(i) for i in range(tabs.count())] == [
         i18n.t("nav." + tid) for tid in win._tab_ids]
 
@@ -269,6 +270,50 @@ def test_firmware_lists_sketches(win):
     names = [win.firmware_panel._sketch.itemText(i)
              for i in range(win.firmware_panel._sketch.count())]
     assert any("EMVyBomberCat" in n for n in names)
+
+
+def test_firmware_panels_present(win):
+    # ADR-001: un Tab por firmware. firmware_panel es el control-plane (Device).
+    assert win.firmware_panel is win.device_panel
+    for p in win._fw_panels:
+        assert p is not None
+
+
+def test_firmware_gating_by_capability(win):
+    # gated: arrancan con el cuerpo deshabilitado; la cabecera (flashear) activa
+    assert win.mifare_panel._body.isEnabled() is False
+    assert win.mifare_panel._flash_btn.isEnabled() is True
+    assert win.device_panel._body.isEnabled() is True     # control-plane siempre activo
+    # broadcast de un status con solo 'mifare' habilita Mifare y deshabilita el resto
+    win._fw_broadcast({"name": "MifareClassic", "version": "1.3.0",
+                       "detected": "yes", "capabilities": ["mifare"]})
+    assert win.mifare_panel._body.isEnabled() is True
+    assert win.tags_panel._body.isEnabled() is False
+    assert "activo" in win.mifare_panel._pill.text()
+    assert "requiere DetectTags" in win.tags_panel._pill.text()
+    # la cabecera del Device refleja fw + detección
+    assert win.device_panel._l_name.text() == "MifareClassic"
+    assert win.device_panel._det_pill.property("pill") == "on"
+
+
+def test_firmware_renderers(win):
+    # los renderizadores toleran None y listas, sin tocar hardware
+    win.tags_panel.show_tag({"uid": "04A1B2C3", "tech": None})
+    assert win.tags_panel._table.rowCount() == 2
+    win.readers_fw_panel.show_reader([{"aid": "A000000004", "label": "MC"}])
+    assert win.readers_fw_panel._table.rowCount() == 2
+    win.magspoof_panel.show_magspoof({"t1": "%B..?", "analysis": {"pan": "4111"}})
+    labels = [win.magspoof_panel._table.item(i, 0).text()
+              for i in range(win.magspoof_panel._table.rowCount())]
+    assert "analysis.pan" in labels        # `analysis` aplanado
+    win.magspoof_panel.show_cards([{"name": "visa", "t2": ";4111?"}])
+    assert win.magspoof_panel._cards_table.rowCount() == 1
+    assert win.magspoof_panel._card_name.count() == 1
+    win.mifare_panel.show_keys([{"name": "default", "key": "FFFFFFFFFFFF"}])
+    assert win.mifare_panel._keys_table.rowCount() == 1
+    win.mifare_panel.show_dump({"uid": "DEADBEEF", "sectors": [1, 2, 3]})
+    win.relay_panel.show_status({"state": "relaying", "relayed": "7"})
+    assert win.relay_panel._status_table.rowCount() == 2
 
 
 def test_charges_and_poc_construct(win):

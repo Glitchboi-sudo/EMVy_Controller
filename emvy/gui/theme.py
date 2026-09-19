@@ -122,6 +122,22 @@ QPushButton[accent="true"] {{
     background-color: {ACCENT}; color: {ACCENT_FG}; border: 1px solid {ACCENT};
 }}
 QPushButton[accent="true"]:hover {{ background-color: {ACCENT_HI}; }}
+QPushButton[accent="true"]:disabled {{
+    background-color: {PANEL}; color: {MUTED}; border-color: {BORDER};
+}}
+
+/* ---- etiquetas semánticas (por propiedad dinámica; ver gui/panels) --- */
+/* texto de ayuda/subtítulo tenue — reemplaza los color:#... hardcodeados */
+QLabel[hint="true"] {{ color: {MUTED}; }}
+/* encabezado de sección dentro de un panel */
+QLabel[h2="true"] {{ color: {TEXT}; font-weight: 700; font-size: 13px; }}
+/* "pill" de estado de capacidad: on=activo (acento), off=deshabilitado (tenue) */
+QLabel[pill="on"], QLabel[pill="off"], QLabel[pill="warn"] {{
+    border-radius: 10px; padding: 2px 10px; font-weight: 700; font-size: 11px;
+}}
+QLabel[pill="on"] {{ color: {ACCENT_FG}; background-color: {ACCENT}; }}
+QLabel[pill="off"] {{ color: {MUTED}; background-color: {SURFACE2}; border: 1px solid {BORDER}; }}
+QLabel[pill="warn"] {{ color: {ACCENT_FG}; background-color: {WARNING}; }}
 
 /* ---- campos de entrada ---------------------------------------------- */
 QLineEdit, QPlainTextEdit, QTextEdit, QSpinBox, QDoubleSpinBox {{

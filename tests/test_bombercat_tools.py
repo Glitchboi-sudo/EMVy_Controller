@@ -47,3 +47,92 @@ def test_run_capture_help():
     cp = bt.run_capture(["--help"], timeout=60)
     assert cp.returncode == 0
     assert "flash" in cp.stdout and "relay" in cp.stdout
+
+
+# ---------------------------------------------------------------------------
+# Parseo puro de tablas rich (status / relay) — sin hardware ni subprocess
+# ---------------------------------------------------------------------------
+_STATUS_TABLE = (
+    "         BomberCat status          \n"
+    "┏━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━┓\n"
+    "│ name         │ NFCGate          │\n"
+    "│ version      │ 0.9.7            │\n"
+    "│ detected     │ yes              │\n"
+    "│ capabilities │ relay, config,   │\n"
+    "│              │ capture          │\n"
+    "└──────────────┴──────────────────┘\n"
+)
+
+
+def test_parse_status():
+    st = bt.parse_status(_STATUS_TABLE)
+    assert st["name"] == "NFCGate"
+    assert st["version"] == "0.9.7"
+    assert st["detected"] == "yes"
+    # 'capture' viene de la continuación de celda multilínea
+    assert st["capabilities"] == ["relay", "config", "capture"]
+
+
+def test_parse_status_empty_caps():
+    text = "│ name │ DetectTags │\n│ capabilities │ — │\n"
+    st = bt.parse_status(text)
+    assert st["name"] == "DetectTags" and st["capabilities"] == []
+
+
+def test_image_for_capability():
+    assert bt.image_for_capability("mifare") == "MifareClassic"
+    assert bt.image_for_capability("relay") == "NFCGate"
+    with pytest.raises(bt.BombercatToolsError):
+        bt.image_for_capability("nope")
+
+
+def test_parse_relay_config_and_status():
+    cfg = bt.parse_relay_config(
+        "│ fw │ nfcgate │\n│ role │ reader │\n│ ssid │ lab │\n"
+        "│ server │ 10.0.0.5 │\n│ port │ 5566 │\n│ session │ 3 │\n│ state │ idle │\n")
+    assert cfg["role"] == "reader" and cfg["server"] == "10.0.0.5" and cfg["session"] == "3"
+    stt = bt.parse_relay_status(
+        "│ state │ relaying │\n│ link connected │ yes │\n"
+        "│ peer present │ no │\n│ APDU pairs relayed │ 12 │\n")
+    assert stt["state"] == "relaying" and stt["link_connected"] is True
+    assert stt["peer_present"] is False and stt["relayed"] == "12"
+
+
+# ---------------------------------------------------------------------------
+# Construcción de argumentos (monkeypatch run_capture/run_json; sin subprocess)
+# ---------------------------------------------------------------------------
+def test_magspoof_card_add_omits_empty_tracks(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(bt, "run_capture", lambda args, **kw: seen.setdefault("args", args))
+    bt.magspoof_card_add("mycard", t1=None, t2="; 4111 ?", port="/dev/ttyACM0")
+    assert seen["args"] == ["magspoof", "card", "add", "mycard",
+                            "--t2", "; 4111 ?", "-p", "/dev/ttyACM0"]
+
+
+def test_magspoof_card_list_jsonl_empty_ok(monkeypatch):
+    class _CP:
+        stdout = ""            # store vacío: salida sin JSON es válida (lista vacía)
+    monkeypatch.setattr(bt, "run_capture", lambda args, **kw: _CP())
+    assert bt.magspoof_card_list() == []
+
+
+def test_mifare_restore_args(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(bt, "run_capture", lambda args, **kw: seen.setdefault("args", args))
+    bt.mifare_restore("/tmp/d.json", write_block0=True)
+    assert seen["args"][:5] == ["tags", "mifare", "restore", "--dump", "/tmp/d.json"]
+    assert "--yes" in seen["args"] and "--write-block0" in seen["args"]
+
+
+def test_capture_run_times_out_and_stops(monkeypatch):
+    import subprocess
+    calls = {"stop": 0}
+
+    def _raise_timeout(args, **kw):
+        raise subprocess.TimeoutExpired(cmd=args, timeout=kw.get("timeout", 0))
+
+    monkeypatch.setattr(bt, "run_capture", _raise_timeout)
+    monkeypatch.setattr(bt, "capture_stop",
+                        lambda **kw: calls.__setitem__("stop", calls["stop"] + 1))
+    cp, timed_out = bt.capture_run("/tmp/x.pcap", duration=0.01)
+    assert timed_out is True and calls["stop"] == 1

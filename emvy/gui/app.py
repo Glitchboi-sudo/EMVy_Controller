@@ -32,7 +32,12 @@ from .panels.charges import ChargesPanel
 from .panels.console import RawConsole
 from .panels.dashboard import DashboardPanel
 from .panels.explorer import ExplorerPanel
-from .panels.firmware import FirmwarePanel
+from .panels.firmware import (
+    DevicePanel, MagspoofPanel, MifarePanel, RelayPanel, TagsPanel,
+)
+# DetectReaders (firmware) — aliasado para no colisionar con el panel de lectores
+# hardware (`.panels.readers.ReadersPanel`), que también se llama ReadersPanel.
+from .panels.firmware import ReadersPanel as FwReadersPanel
 from .panels.fuzz import FuzzPanel
 from .panels.intercept import InterceptPanel
 from .panels.poc import PocPanel
@@ -97,7 +102,19 @@ class MainWindow(QMainWindow):
         self.charges_panel = ChargesPanel(self)
         self.poc_panel = PocPanel(self)
         self.intercept_panel = InterceptPanel(self)
-        self.firmware_panel = FirmwarePanel(self)
+        # Paneles BomberCat — un Tab por firmware (ADR-001). El DevicePanel es el
+        # control-plane (posee el puerto, compila/flashea); los demás son gated.
+        self.device_panel = DevicePanel(self)
+        self.tags_panel = TagsPanel(self)
+        self.readers_fw_panel = FwReadersPanel(self)
+        self.magspoof_panel = MagspoofPanel(self)
+        self.mifare_panel = MifarePanel(self)
+        self.relay_panel = RelayPanel(self)
+        # Compat: `firmware_panel` (usado por compile_firmware/setup_usb_permissions)
+        # es el DevicePanel. `_fw_panels` = todos, para el broadcast de estado.
+        self.firmware_panel = self.device_panel
+        self._fw_panels = [self.device_panel, self.tags_panel, self.readers_fw_panel,
+                           self.magspoof_panel, self.mifare_panel, self.relay_panel]
         self.fuzz_panel = FuzzPanel(self)
         self.settings_panel = SettingsPanel(self)
         # (id estable, panel, clave i18n) — el id desacopla la lógica del texto
@@ -112,7 +129,12 @@ class MainWindow(QMainWindow):
             ("charges", self.charges_panel, "nav.charges"),
             ("poc", self.poc_panel, "nav.poc"),
             ("intercept", self.intercept_panel, "nav.intercept"),
-            ("firmware", self.firmware_panel, "nav.firmware"),
+            ("device", self.device_panel, "nav.device"),
+            ("tags", self.tags_panel, "nav.tags"),
+            ("readers_fw", self.readers_fw_panel, "nav.readers_fw"),
+            ("magspoof", self.magspoof_panel, "nav.magspoof"),
+            ("mifare", self.mifare_panel, "nav.mifare"),
+            ("relay", self.relay_panel, "nav.relay"),
             ("fuzzing", self.fuzz_panel, "nav.fuzzing"),
             ("settings", self.settings_panel, "nav.settings"),
         ]
@@ -151,16 +173,21 @@ class MainWindow(QMainWindow):
     # Pestañas (por id) donde la consola cruda (APDU/transporte) aporta; en el
     # resto se oculta para reducir ruido visual.
     _CONSOLE_TAB_IDS = frozenset({"readers", "explorer", "tools", "charges",
-                                  "poc", "intercept", "firmware", "fuzzing"})
+                                  "poc", "intercept", "device", "tags", "readers_fw",
+                                  "magspoof", "mifare", "relay", "fuzzing"})
 
     # Navegación agrupada de la barra lateral: (clave-grupo i18n, [(id, icono)…]).
+    # HARDWARE lista un Tab por firmware BomberCat (ADR-001): Dispositivo (control-plane)
+    # + los gated (Tags/Readers/Magspoof/Mifare/Relay).
     _NAV_GROUPS = (
         ("group.session", (("home", "home"), ("projects", "folder"),
                            ("variables", "sliders"), ("readers", "plug"))),
         ("group.card", (("explorer", "search"), ("tools", "wrench"))),
         ("group.ops", (("charges", "credit-card"), ("poc", "flask"),
                        ("intercept", "shield"), ("fuzzing", "zap"))),
-        ("group.hardware", (("firmware", "cpu"),)),
+        ("group.hardware", (("device", "cpu"), ("tags", "tag"), ("readers_fw", "plug"),
+                            ("magspoof", "credit-card"), ("mifare", "key"),
+                            ("relay", "radio"))),
         ("group.settings", (("settings", "sliders"),)),
     )
 
@@ -817,6 +844,250 @@ class MainWindow(QMainWindow):
                                                      "(reconecta el BomberCat tras aplicar).")),
                on_error=lambda m: (self.firmware_panel.log(f"✗ {m}"),
                                    self.notify.emit(f"Permisos USB: {m}")))
+
+    # -- BomberCat: operar firmwares oficiales (bombercat-tools) ------------
+    # Todo pasa por bombercat_tools (subprocess contra el venv del vendor) en un
+    # worker; el resultado vuelve a los renderizadores del panel por señal Qt.
+    def firmware_port(self) -> str | None:
+        """Puerto serie compartido por todos los paneles de firmware (lo posee el
+        DevicePanel)."""
+        return self.device_panel.port()
+
+    def _fw_broadcast(self, st: dict) -> None:
+        """Propaga el estado (fw + capacidades) a TODOS los paneles de firmware,
+        que re-gatean su habilitación a la vez (solo uno queda activo)."""
+        for p in self._fw_panels:
+            try:
+                p.set_status(st)
+            except Exception:
+                pass
+
+    def refresh_device(self) -> None:
+        from ..integrations import bombercat_tools as bt
+        self.device_panel.log("→ status…")
+        submit(self.pool, lambda: bt.status_json(port=self.firmware_port()),
+               on_result=self._fw_broadcast,
+               on_error=lambda m: (self.device_panel.log(f"✗ {m}"),
+                                   self.notify.emit(f"BomberCat: {m}")))
+
+    def identify_device(self) -> None:
+        from ..integrations import bombercat_tools as bt
+        self.device_panel.log("→ identify (parpadeo del LED)…")
+        submit(self.pool, lambda: bt.identify(port=self.firmware_port()),
+               on_result=lambda r: self.device_panel.log_result(r),
+               on_error=lambda m: self.notify.emit(f"identify: {m}"))
+
+    def reload_flash_images(self) -> None:
+        from ..integrations import bombercat_tools as bt
+        self.device_panel.log("→ flash --list (arranca el venv del vendor la 1ª vez)…")
+        submit(self.pool, bt.fw_list_names,
+               on_result=lambda names: self.device_panel.set_images(names),
+               on_error=lambda m: (self.device_panel.log(f"✗ {m}"),
+                                   self.notify.emit(f"Imágenes: {m}")))
+
+    def flash_image(self, name: str, *, port: str | None = None) -> None:
+        """Flashea una imagen oficial `.uf2`, con confirmación (borra la config)."""
+        from PySide6.QtWidgets import QMessageBox
+        from ..integrations import bombercat_tools as bt
+        if QMessageBox.question(
+                self, "Flashear firmware",
+                f"Se flasheará «{name}». Esto reescribe toda la imagen y BORRA la "
+                "configuración guardada en la placa (WiFi/relay de NFCGate).\n\n¿Continuar?"
+        ) != QMessageBox.Yes:
+            return
+        p = port or self.firmware_port()
+        self.device_panel.log(f"→ flasheando {name}… no desconectes la placa.")
+        submit(self.pool, lambda: bt.flash_capture(name, port=p),
+               on_result=lambda r: (self.device_panel.log_result(r), self.refresh_device()),
+               on_error=lambda m: (self.device_panel.log(f"✗ {m}"),
+                                   self.notify.emit(f"Flasheo: {m}")))
+
+    def tags_read(self, timeout: int) -> None:
+        from ..integrations import bombercat_tools as bt
+        self.tags_panel.log(f"→ tags read (timeout {timeout}s)…")
+        submit(self.pool, lambda: bt.tags_read(timeout),
+               on_result=lambda d: (self.tags_panel.show_tag(d),
+                                    self.tags_panel.log("✓ tag leído")),
+               on_error=lambda m: (self.tags_panel.log(f"✗ {m}"),
+                                   self.notify.emit(f"Tags: {m}")))
+
+    def readers_read(self, timeout: int) -> None:
+        from ..integrations import bombercat_tools as bt
+        self.readers_fw_panel.log(f"→ readers read (timeout {timeout}s)…")
+        submit(self.pool, lambda: bt.readers_read(timeout),
+               on_result=lambda d: (self.readers_fw_panel.show_reader(d),
+                                    self.readers_fw_panel.log("✓ lector detectado")),
+               on_error=lambda m: (self.readers_fw_panel.log(f"✗ {m}"),
+                                   self.notify.emit(f"Readers: {m}")))
+
+    # -- magspoof -----------------------------------------------------------
+    def magspoof_show(self) -> None:
+        from ..integrations import bombercat_tools as bt
+        submit(self.pool, lambda: bt.magspoof_show(port=self.firmware_port()),
+               on_result=lambda d: self.magspoof_panel.show_magspoof(d),
+               on_error=lambda m: self.notify.emit(f"magspoof: {m}"))
+
+    def magspoof_play(self) -> None:
+        from ..integrations import bombercat_tools as bt
+        self.magspoof_panel.log("→ magspoof play…")
+        submit(self.pool, lambda: bt.magspoof_play(port=self.firmware_port()),
+               on_result=lambda r: self.magspoof_panel.log_result(r),
+               on_error=lambda m: self.notify.emit(f"magspoof: {m}"))
+
+    def magspoof_nfc_visa(self) -> None:
+        from ..integrations import bombercat_tools as bt
+        self.magspoof_panel.log("→ magspoof nfc visa…")
+        submit(self.pool, lambda: bt.magspoof_nfc_visa(port=self.firmware_port()),
+               on_result=lambda r: self.magspoof_panel.log_result(r),
+               on_error=lambda m: self.notify.emit(f"magspoof: {m}"))
+
+    def magspoof_card_list(self) -> None:
+        from ..integrations import bombercat_tools as bt
+        submit(self.pool, lambda: bt.magspoof_card_list(port=self.firmware_port()),
+               on_result=lambda c: self.magspoof_panel.show_cards(c),
+               on_error=lambda m: self.notify.emit(f"magspoof: {m}"))
+
+    def magspoof_card_select(self, name: str) -> None:
+        from ..integrations import bombercat_tools as bt
+        if not name:
+            self.notify.emit("magspoof: indica el nombre de la tarjeta.")
+            return
+        submit(self.pool, lambda: bt.magspoof_card_select(name, port=self.firmware_port()),
+               on_result=lambda r: self.magspoof_panel.log_result(r),
+               on_error=lambda m: self.notify.emit(f"magspoof: {m}"))
+
+    def magspoof_card_add(self, name: str, t1: str, t2: str) -> None:
+        from ..integrations import bombercat_tools as bt
+        if not name or not (t1 or t2):
+            self.notify.emit("magspoof: indica nombre y al menos un track.")
+            return
+        submit(self.pool,
+               lambda: bt.magspoof_card_add(name, t1=t1 or None, t2=t2 or None,
+                                            port=self.firmware_port()),
+               on_result=lambda r: (self.magspoof_panel.log_result(r), self.magspoof_card_list()),
+               on_error=lambda m: self.notify.emit(f"magspoof: {m}"))
+
+    # -- mifare -------------------------------------------------------------
+    def mifare_keys(self) -> None:
+        from ..integrations import bombercat_tools as bt
+        submit(self.pool, lambda: bt.mifare_keys(port=self.firmware_port()),
+               on_result=lambda k: self.mifare_panel.show_keys(k),
+               on_error=lambda m: self.notify.emit(f"mifare: {m}"))
+
+    def _artifacts_dir(self):
+        """Ruta artifacts/ del proyecto activo (la crea); None si no hay proyecto."""
+        proj = store.active_project()
+        if not proj:
+            self.notify.emit("No hay proyecto activo (necesario para artifacts/).")
+            return None
+        d = proj.artifacts_dir
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def mifare_dump(self, sectors: int) -> None:
+        from datetime import datetime
+        from ..integrations import bombercat_tools as bt
+        art = self._artifacts_dir()
+        if art is None:
+            return
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        keyfile = art / f"mifare-{ts}.keys"
+        dumpfile = art / f"mifare-{ts}.json"
+        p = self.firmware_port()
+        self.mifare_panel.log(f"→ check → dump (sectores {sectors}) → {dumpfile.name}")
+
+        def _do():
+            bt.mifare_check(keyfile, sectors=sectors, port=p)
+            return bt.mifare_dump(keyfile, dumpfile, sectors=sectors, port=p)
+
+        submit(self.pool, _do,
+               on_result=lambda d: (self.mifare_panel.show_dump(d),
+                                    self.mifare_panel.log(f"✓ volcado en {dumpfile.name}"),
+                                    self.mifare_reload_dumps()),
+               on_error=lambda m: (self.mifare_panel.log(f"✗ {m}"),
+                                   self.notify.emit(f"mifare: {m}")))
+
+    def mifare_reload_dumps(self) -> None:
+        art = self._artifacts_dir()
+        names = sorted(p.name for p in art.glob("mifare-*.json")) if art else []
+        self.mifare_panel.set_dumps(names)
+
+    def mifare_restore(self, dump_name: str) -> None:
+        from ..integrations import bombercat_tools as bt
+        art = self._artifacts_dir()
+        if art is None:
+            return
+        path = art / dump_name
+        self.mifare_panel.log(f"→ restore {dump_name}…")
+        submit(self.pool, lambda: bt.mifare_restore(path, port=self.firmware_port()),
+               on_result=lambda r: self.mifare_panel.log_result(r),
+               on_error=lambda m: (self.mifare_panel.log(f"✗ {m}"),
+                                   self.notify.emit(f"mifare: {m}")))
+
+    # -- relay NFCGate ------------------------------------------------------
+    def relay_config_show(self) -> None:
+        from ..integrations import bombercat_tools as bt
+        submit(self.pool, lambda: bt.relay_config_show(port=self.firmware_port()),
+               on_result=lambda d: self.relay_panel.show_config(d),
+               on_error=lambda m: self.notify.emit(f"relay: {m}"))
+
+    def relay_config_wifi(self, ssid: str, password: str, *, save: bool = True) -> None:
+        from ..integrations import bombercat_tools as bt
+        self.relay_panel.log(f"→ relay config wifi {ssid}…")
+        submit(self.pool,
+               lambda: bt.relay_config_wifi(ssid, password, save=save, port=self.firmware_port()),
+               on_result=lambda r: self.relay_panel.log_result(r),
+               on_error=lambda m: self.notify.emit(f"relay: {m}"))
+
+    def relay_config_nfcgate(self, server: str, session: int, role: str, *, save: bool = True) -> None:
+        from ..integrations import bombercat_tools as bt
+        self.relay_panel.log(f"→ relay config nfcgate {server} s{session} {role}…")
+        submit(self.pool,
+               lambda: bt.relay_config_nfcgate(server, session, role, save=save,
+                                               port=self.firmware_port()),
+               on_result=lambda r: self.relay_panel.log_result(r),
+               on_error=lambda m: self.notify.emit(f"relay: {m}"))
+
+    def relay_run(self) -> None:
+        from ..integrations import bombercat_tools as bt
+        self.relay_panel.log("→ relay run (puede tardar ~45 s en llegar a 'relaying')…")
+        submit(self.pool, lambda: bt.relay_run(port=self.firmware_port()),
+               on_result=lambda r: (self.relay_panel.log_result(r), self.relay_status()),
+               on_error=lambda m: (self.relay_panel.log(f"✗ {m}"),
+                                   self.notify.emit(f"relay: {m}")))
+
+    def relay_stop(self) -> None:
+        from ..integrations import bombercat_tools as bt
+        self.relay_panel.log("→ relay stop…")
+        submit(self.pool, lambda: bt.relay_stop(port=self.firmware_port()),
+               on_result=lambda r: (self.relay_panel.log_result(r), self.relay_status()),
+               on_error=lambda m: self.notify.emit(f"relay: {m}"))
+
+    def relay_status(self) -> None:
+        from ..integrations import bombercat_tools as bt
+        submit(self.pool, lambda: bt.relay_status(port=self.firmware_port()),
+               on_result=lambda d: self.relay_panel.show_status(d),
+               on_error=lambda m: self.notify.emit(f"relay: {m}"))
+
+    def relay_capture(self, duration: int) -> None:
+        from datetime import datetime
+        from ..integrations import bombercat_tools as bt
+        art = self._artifacts_dir()
+        if art is None:
+            return
+        out = art / f"relay-{datetime.now().strftime('%Y%m%d-%H%M%S')}.pcap"
+        p = self.firmware_port()
+        self.relay_panel.log(f"→ capturando {duration}s → {out.name} (se desarma al terminar)…")
+
+        def _do():
+            cp, timed_out = bt.capture_run(out, duration=duration, port=p)
+            return cp
+
+        submit(self.pool, _do,
+               on_result=lambda r: (self.relay_panel.log_result(r),
+                                    self.relay_panel.log(f"✓ pcap en {out.name}")),
+               on_error=lambda m: (self.relay_panel.log(f"✗ {m}"),
+                                   self.notify.emit(f"captura: {m}")))
 
 
 def _harden_qt_env() -> None:
