@@ -731,6 +731,22 @@ inicializa con `submodules: recursive`.
 > (`ping`→`+OK bombercat`); una BomberCat con el firmware **EMVyBomberCat previo** al commit del
 > contrato responde `PONG` y saldría como "presente pero sin REPL". Flashea el EMVyBomberCat
 > actualizado (o una imagen oficial) para que la placa sea descubierta.
+>
+> **EMVyBomberCat registrado en el vendor** (rama `Test`): el submódulo lleva **una adición local
+> sobre v1.3.0** (`v1.3.0-1-g54bccd8`) que registra `emvybombercat` en `modules/core/firmwares.py`
+> (`detect_firmware` mapea `info.fw_name`→registro; sin entrada caía a `UNKNOWN`/"Unknown / none").
+> Declara `identify+monitor+passthrough` (honesto: su superficie EMV/APDU/emulación usa el **dialecto
+> propio de EMVy** vía `emvy/readers/bombercat.py`, no los protocolos tags/mifare/relay del vendor →
+> los paneles gated de esas capacidades siguen deshabilitados con EMVyBomberCat, que es lo correcto).
+> Es una adición **local**: si se resetea el submódulo (`git submodule update`), reaplícala.
+>
+> **Puerto serie único (caveat de operación):** la BomberCat expone **un** `/dev/ttyACM*`. Mientras
+> EMVy tiene el **lector BomberCat conectado** (pestaña Lectores → el proceso mantiene el puerto
+> abierto), el CLI del vendor —y por tanto los paneles de firmware (status/flash/tags/…)— **no puede
+> abrir la placa** (da "no control REPL"). Desconecta el lector antes de operar los paneles de
+> firmware, y viceversa. Además, tras re-enumerar (flasheo), el nodo puede cambiar de grupo
+> `uucp`→`dialout`: si da *Permission denied*, corre "Permisos USB" (`setup-env`: añade a
+> `dialout`/`plugdev` + udev) y reconecta/reloguéate.
 
 - **Adaptador**: `emvy/integrations/bombercat_tools.py` lo maneja por **subprocess** —
   `locate()`/`ensure_venv()` (bootstrap perezoso), `run_passthrough()`, `run_json()` (extrae JSON de
