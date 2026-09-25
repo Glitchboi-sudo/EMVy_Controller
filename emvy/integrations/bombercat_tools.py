@@ -1,7 +1,7 @@
 """Adaptador de `bombercat-tools` (Electronic Cats), como **submódulo git** en
-`vendor/bombercat-tools/` (pinned a v1.2.0.0). EMVy lo maneja por **subprocess**
-contra su propio venv aislado — así el framework conserva sus dependencias con
-pines propios y no contamina el venv de EMVy.
+`vendor/bombercat-tools/` (rama `feature/EMV` → v1.4.0). EMVy lo maneja por
+**subprocess** contra su propio venv aislado — así el framework conserva sus
+dependencias con pines propios y no contamina el venv de EMVy.
 
 Expone:
   * `locate()` / `ensure_venv()` — ubicación y bootstrap perezoso del venv.
@@ -294,12 +294,12 @@ def setup_env_gui(*, progress=None) -> subprocess.CompletedProcess:
 # ===========================================================================
 # Los helpers de abajo manejan los subcomandos que aparecen a partir de
 # v1.3.0 del framework (`status`, `identify`, el grupo `tags mifare`, `magspoof`
-# y `relay`/`capture`). El submódulo `vendor/bombercat-tools` de este repo está
-# clavado a v1.2.0.0; para usarlos contra hardware real hay que subir el pin del
-# submódulo a v1.3.0 (`git -C vendor/bombercat-tools checkout v1.3.0`). Si el
-# subcomando no existe en la versión instalada, el helper falla limpio con
-# `BombercatToolsError` (no cuelga). Son puros a nivel de construcción de args y
-# de parseo, así que los tests los cubren monkeypatcheando `run_capture`/`run_json`.
+# y `relay`/`capture`) y, desde v1.4.0, el grupo `emvy …` (ver más abajo). El
+# submódulo `vendor/bombercat-tools` de este repo sigue la rama `feature/EMV`
+# (v1.4.0); si un subcomando no existe en la versión instalada, el helper falla
+# limpio con `BombercatToolsError` (no cuelga). Son puros a nivel de construcción
+# de args y de parseo, así que los tests los cubren monkeypatcheando
+# `run_capture`/`run_json`.
 
 
 # ---------------------------------------------------------------------------
@@ -377,6 +377,7 @@ CAPABILITY_IMAGE: dict[str, str] = {
     "relay": "NFCGate",
     "config": "NFCGate",
     "capture": "NFCGate",
+    "emvy": "EMVyBomberCat",   # firmware propio EMVyBomberCat (grupo `bombercat emvy …`)
 }
 
 
@@ -603,3 +604,140 @@ def capture_run(output, *, duration: float = 30, force: bool = True,
         except Exception:
             pass                       # best-effort: si ya se desarmó, no es error
     return cp, timed_out
+
+
+# ===========================================================================
+# EMVyBomberCat: grupo `bombercat emvy …` (bombercat-tools >= v1.4.0)
+# ===========================================================================
+# Desde v1.4.0 el firmware propio EMVyBomberCat es un firmware REGISTRADO del
+# vendor (capacidad `emvy` = CAP_EMVY, imagen oficial `EMVyBomberCat.uf2`) y el
+# framework expone `bombercat emvy …` para operarlo con el mismo patrón gated/
+# auto-flash que el resto. Estos helpers envuelven ese grupo.
+#
+# OJO — puerto único: EMVy Controller ya maneja el EMVyBomberCat DIRECTO por serie
+# (`emvy/readers/bombercat.py`, con traza de transporte y flujo integrado en
+# Explorador/Fuzzing). Estos helpers son la ruta ALTERNA por el framework del
+# vendor: hablan a la MISMA placa por el MISMO /dev/ttyACM*, así que no se pueden
+# usar a la vez que el lector BomberCat conectado (ver CLAUDE.md §12). Útiles para
+# operar/diagnosticar la placa desde el plano de firmware (donde el lector propio
+# no tiene el puerto abierto).
+#
+# `read`/`tag`/`apdu`/`cardscan` ofrecen `--json` → devolvemos el objeto parseado;
+# `mag`/`emu`/`nfcinfo`/`reboot` confirman en texto → devolvemos el
+# CompletedProcess (volcar con `log_result`); `info` imprime una tabla de 2
+# columnas que parseamos con `_table_rows`.
+def emvy_info(port: str | None = None, timeout: float = 30) -> dict:
+    """Estado del firmware EMVyBomberCat (`emvy info`) → {version, state}.
+
+    Parsea la tabla de 2 columnas del comando. Lanza `BombercatToolsError` si la
+    placa no respondió (no es EMVyBomberCat, o no hay tabla)."""
+    cp = run_capture(["emvy", "info"] + _port_args(port), timeout=timeout)
+    fields = _table_rows(cp.stdout)
+    if not fields:
+        tail = (cp.stderr.strip() or cp.stdout.strip())[:400]
+        raise BombercatToolsError(
+            f"`emvy info` no devolvió estado (rc={cp.returncode}).\n{tail}")
+    return {"version": fields.get("version", ""), "state": fields.get("state", "")}
+
+
+def emvy_read(cents: int = 500, *, port: str | None = None, timeout: float = 30) -> dict:
+    """Lee una tarjeta EMV por SCAN (`emvy read --json --amount <cents>`).
+
+    Devuelve el objeto parseado por el firmware (PAN/expiry/AID/track2/…). Acerca
+    la tarjeta al arrancar. Lanza `BombercatToolsError` si no hubo tarjeta o el
+    SCAN falló (el comando sale != 0 y sin JSON)."""
+    return run_json(
+        ["emvy", "read", "--json", "--amount", str(int(cents)), "-t", str(timeout)]
+        + _port_args(port),
+        timeout=timeout + 10,
+    )
+
+
+def emvy_tag(port: str | None = None, timeout: float = 20) -> dict:
+    """UID de un tag cercano (`emvy tag --json`) → {proto, uid[, tech]}."""
+    data = run_json(["emvy", "tag", "--json"] + _port_args(port), timeout=timeout)
+    return data[0] if isinstance(data, list) else data
+
+
+def emvy_apdu(apdu_hex: str, *, port: str | None = None, wait_ms: int = 30000,
+              timeout: float | None = None) -> bytes:
+    """Tunela un APDU a una tarjeta viva (`emvy apdu <hex> --json`) → bytes de RESP.
+
+    El firmware arma discovery `wait_ms` ms para el primer contacto; `RELEASE` se
+    dispara solo al terminar. Lanza `BombercatToolsError` si no hubo respuesta."""
+    to = timeout if timeout is not None else wait_ms / 1000.0 + 15
+    data = run_json(
+        ["emvy", "apdu", apdu_hex, "--json", "-w", str(int(wait_ms))] + _port_args(port),
+        timeout=to,
+    )
+    obj = data[0] if isinstance(data, list) else data
+    resp = obj.get("resp", "") if isinstance(obj, dict) else ""
+    try:
+        return bytes.fromhex(resp)
+    except ValueError as exc:
+        raise BombercatToolsError(f"RESP no es hex válido: {resp!r}") from exc
+
+
+def emvy_cardscan(port: str | None = None, timeout: float = 30) -> dict:
+    """Lee una tarjeta EMV a la RAM del firmware para reemular
+    (`emvy cardscan --json`) → {aid, pan, exp, t2}. Luego `emvy emu card --from-ram`."""
+    data = run_json(["emvy", "cardscan", "--json"] + _port_args(port), timeout=timeout)
+    return data[0] if isinstance(data, list) else data
+
+
+def emvy_mag(*, t1: str | None = None, t2: str | None = None,
+             port: str | None = None, timeout: float = 20):
+    """Emula un swipe de banda de una o ambas pistas (`emvy mag [--t1] [--t2]`).
+
+    Al menos una pista; las pistas van tal cual (con o sin centinelas ISO)."""
+    args = ["emvy", "mag"]
+    if t1:
+        args += ["--t1", t1]
+    if t2:
+        args += ["--t2", t2]
+    return run_capture(args + _port_args(port), timeout=timeout)
+
+
+def emvy_emu_ndef(ndef_hex: str, *, port: str | None = None,
+                  timeout: float | None = 30, raw: bool = False):
+    """Emula un tag NFC Forum Type 4 sirviendo `ndef_hex` como mensaje NDEF
+    (`emvy emu ndef <hex>`). Streaming: cada APDU del lector va al stdout hasta
+    `EMU:DONE`/timeout. El subproceso se acota con `timeout` (None → tope de
+    seguridad del firmware, 180 s)."""
+    args = ["emvy", "emu", "ndef", ndef_hex]
+    if raw:
+        args.append("--raw")
+    if timeout is not None:
+        args += ["-t", str(timeout)]
+    return run_capture(args + _port_args(port), timeout=(timeout or 180) + 10)
+
+
+def emvy_emu_card(*, from_ram: bool = False, aid: str = "", pan: str = "",
+                  exp: str = "", track2: str = "", port: str | None = None,
+                  timeout: float | None = 30, raw: bool = False):
+    """Emula una tarjeta EMV a un terminal de pago (`emvy emu card`).
+
+    Sin opciones sirve una Visa de prueba; `from_ram` reemula la última tarjeta de
+    `emvy cardscan`; `aid`/`pan`/`exp`/`track2` (hex) inyectan una captura (mutuamente
+    excluyente con `from_ram`). No aprueba el pago — revela qué pide el terminal."""
+    args = ["emvy", "emu", "card"]
+    if from_ram:
+        args.append("--from-ram")
+    for flag, val in (("--aid", aid), ("--pan", pan), ("--exp", exp), ("--track2", track2)):
+        if val:
+            args += [flag, val]
+    if raw:
+        args.append("--raw")
+    if timeout is not None:
+        args += ["-t", str(timeout)]
+    return run_capture(args + _port_args(port), timeout=(timeout or 180) + 10)
+
+
+def emvy_nfcinfo(port: str | None = None, timeout: float = 20):
+    """Diagnóstico del PN7150 por I2C + re-arma discovery (`emvy nfcinfo`)."""
+    return run_capture(["emvy", "nfcinfo"] + _port_args(port), timeout=timeout)
+
+
+def emvy_reboot(port: str | None = None, timeout: float = 20):
+    """Reinicia el MCU (`emvy reboot`). El USB CDC se re-enumera: reconecta después."""
+    return run_capture(["emvy", "reboot"] + _port_args(port), timeout=timeout)

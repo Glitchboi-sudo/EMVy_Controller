@@ -82,6 +82,7 @@ def test_parse_status_empty_caps():
 def test_image_for_capability():
     assert bt.image_for_capability("mifare") == "MifareClassic"
     assert bt.image_for_capability("relay") == "NFCGate"
+    assert bt.image_for_capability("emvy") == "EMVyBomberCat"
     with pytest.raises(bt.BombercatToolsError):
         bt.image_for_capability("nope")
 
@@ -136,3 +137,89 @@ def test_capture_run_times_out_and_stops(monkeypatch):
                         lambda **kw: calls.__setitem__("stop", calls["stop"] + 1))
     cp, timed_out = bt.capture_run("/tmp/x.pcap", duration=0.01)
     assert timed_out is True and calls["stop"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Grupo `bombercat emvy …` (v1.4.0) — construcción de args + parseo
+# ---------------------------------------------------------------------------
+def test_emvy_info_parses_table(monkeypatch):
+    text = (
+        "        EMVyBomberCat @ /dev/ttyACM0        \n"
+        "┏━━━━━━━━━━┳━━━━━━━━━━━┓\n"
+        "│ version  │ 1.0.0     │\n"
+        "│ state    │ idle      │\n"
+        "└──────────┴───────────┘\n"
+    )
+    seen = {}
+
+    class _CP:
+        stdout = text; stderr = ""; returncode = 0
+
+    def _run(args, **kw):
+        seen["args"] = args
+        return _CP()
+
+    monkeypatch.setattr(bt, "run_capture", _run)
+    info = bt.emvy_info(port="/dev/ttyACM0")
+    assert seen["args"] == ["emvy", "info", "-p", "/dev/ttyACM0"]
+    assert info == {"version": "1.0.0", "state": "idle"}
+
+
+def test_emvy_info_no_table_raises(monkeypatch):
+    class _CP:
+        stdout = ""; stderr = "no board"; returncode = 1
+
+    monkeypatch.setattr(bt, "run_capture", lambda args, **kw: _CP())
+    with pytest.raises(bt.BombercatToolsError):
+        bt.emvy_info()
+
+
+def test_emvy_read_args(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(bt, "run_json",
+                        lambda args, **kw: seen.setdefault("args", args) or {"pan": "…"})
+    bt.emvy_read(1500, port="/dev/ttyACM0", timeout=25)
+    assert seen["args"] == ["emvy", "read", "--json", "--amount", "1500",
+                            "-t", "25", "-p", "/dev/ttyACM0"]
+
+
+def test_emvy_apdu_returns_bytes(monkeypatch):
+    seen = {}
+
+    def _run_json(args, **kw):
+        seen["args"] = args
+        return {"resp": "9000"}
+
+    monkeypatch.setattr(bt, "run_json", _run_json)
+    resp = bt.emvy_apdu("00A4040000", port="/dev/ttyACM0", wait_ms=5000)
+    assert resp == bytes.fromhex("9000")
+    assert seen["args"][:5] == ["emvy", "apdu", "00A4040000", "--json", "-w"]
+    assert "5000" in seen["args"] and seen["args"][-2:] == ["-p", "/dev/ttyACM0"]
+
+
+def test_emvy_apdu_bad_hex_raises(monkeypatch):
+    monkeypatch.setattr(bt, "run_json", lambda args, **kw: {"resp": "zz"})
+    with pytest.raises(bt.BombercatToolsError):
+        bt.emvy_apdu("00A4040000")
+
+
+def test_emvy_mag_omits_empty_tracks(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(bt, "run_capture", lambda args, **kw: seen.setdefault("args", args))
+    bt.emvy_mag(t2=";4111?", port="/dev/ttyACM0")
+    assert seen["args"] == ["emvy", "mag", "--t2", ";4111?", "-p", "/dev/ttyACM0"]
+
+
+def test_emvy_emu_card_from_ram_args(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(bt, "run_capture", lambda args, **kw: seen.setdefault("args", args))
+    bt.emvy_emu_card(from_ram=True, timeout=None, port="/dev/ttyACM0")
+    assert seen["args"] == ["emvy", "emu", "card", "--from-ram", "-p", "/dev/ttyACM0"]
+
+
+def test_emvy_emu_card_injects_fields(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(bt, "run_capture", lambda args, **kw: seen.setdefault("args", args))
+    bt.emvy_emu_card(pan="1234", track2="ABCD", timeout=60)
+    assert seen["args"] == ["emvy", "emu", "card", "--pan", "1234",
+                            "--track2", "ABCD", "-t", "60"]

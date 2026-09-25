@@ -20,8 +20,9 @@ de hardware pasa por métodos de `MainWindow` (worker en `QThreadPool`); los pan
 widgets y señales.
 
 **Requiere bombercat-tools >= v1.3.0** (los subcomandos `status`/`identify`/`tags mifare`/
-`magspoof`/`relay`). El submódulo de este repo está clavado a v1.2.0.0; súbelo para operar
-hardware real (ver `emvy/integrations/bombercat_tools.py`).
+`magspoof`/`relay`; y v1.4.0 para el grupo `emvy`). El submódulo de este repo sigue la rama
+`feature/EMV` (v1.4.0), que además registra el firmware propio EMVyBomberCat (capacidad
+`emvy`) e incluye su imagen oficial flasheable (ver `emvy/integrations/bombercat_tools.py`).
 """
 from __future__ import annotations
 
