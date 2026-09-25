@@ -17,7 +17,7 @@ class VariablesPanel(QWidget):
         self.win = win
         self._rows: list[str] = []
 
-        self._hint = QLabel(""); self._hint.setStyleSheet("color:#8b949e")
+        self._hint = QLabel(""); self._hint.setProperty("hint", "true")
 
         self._table = QTableWidget(0, 4)
         self._table.setHorizontalHeaderLabels(["tag", "nombre", "valor", "tipo"])
@@ -45,7 +45,7 @@ class VariablesPanel(QWidget):
             self._profile.addItem(p.title, p.id)
         self._profile.currentIndexChanged.connect(self._profile_changed)
         apply_b = QPushButton("Aplicar perfil"); apply_b.clicked.connect(self._apply_profile)
-        self._profile_desc = QLabel(""); self._profile_desc.setStyleSheet("color:#8b949e")
+        self._profile_desc = QLabel(""); self._profile_desc.setProperty("hint", "true")
         prow = QHBoxLayout(); prow.addWidget(self._profile, 1); prow.addWidget(apply_b)
 
         lay = QVBoxLayout(self)

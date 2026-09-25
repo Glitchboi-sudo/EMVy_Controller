@@ -21,7 +21,7 @@ class ChargesPanel(QWidget):
         sub = QLabel("Flujo de switch/adquirente ISO 8583. Config por variables del proyecto "
                      "(switch_host, switch_port, tpdu, terminal_id…). La tarjeta sale de la "
                      "última captura del Explorador.")
-        sub.setWordWrap(True); sub.setStyleSheet("color:#8b949e")
+        sub.setWordWrap(True); sub.setProperty("hint", "true")
 
         self._amount = QLineEdit("500"); self._amount.setFixedWidth(100)
         self._dry = QCheckBox("dry-run"); self._dry.setChecked(True)

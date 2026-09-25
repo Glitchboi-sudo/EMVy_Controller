@@ -1,7 +1,7 @@
 """Panel de lectores: descubre backends/dispositivos y conecta uno."""
 from __future__ import annotations
 
-from textual import on
+from textual import on, work
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Button, DataTable, Static
 
@@ -30,12 +30,24 @@ class ReadersScreen(Vertical):
         self.reload()
 
     def reload(self):
+        """Lanza el descubrimiento en un **worker** (no bloquea la UI): enumerar
+        los backends de hardware —PC/SC, NFC, serie— tarda ~1–2 s y antes
+        congelaba el arranque y cada cambio de pestaña."""
+        self.query_one("#rdr_hint", Static).update("Buscando lectores…")
+        self._scan()
+
+    @work(thread=True, exclusive=True, group="rdr-scan")
+    def _scan(self):
         backends = registry.available_backends()
+        devices = registry.list_all_devices()
+        self.app.call_from_thread(self._populate, backends, devices)
+
+    def _populate(self, backends, devices):
         line = "  ".join(f"{n}={'✓' if ok else '✗'}" for n, ok in backends.items())
         self.query_one("#rdr_backends", Static).update(f"Backends: {line}")
         t = self.query_one("#rdr_table", DataTable)
         t.clear()
-        self._devices = registry.list_all_devices()
+        self._devices = devices
         for i, d in enumerate(self._devices):
             t.add_row(str(i), d.backend, d.name, d.caps_str)
 

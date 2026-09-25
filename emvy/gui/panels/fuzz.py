@@ -28,9 +28,9 @@ class FuzzPanel(QWidget):
         super().__init__()
         self.win = win
         lay = QVBoxLayout(self)
-        warn = QLabel("⚠ Genera datos de tarjeta/NFC fuera de norma para observar cómo "
+        warn = QLabel("Aviso: genera datos de tarjeta/NFC fuera de norma para observar cómo "
                       "reacciona un lector real. Solo hardware propio o autorizado.")
-        warn.setWordWrap(True); warn.setStyleSheet("color:#e3b341")
+        warn.setWordWrap(True); warn.setProperty("hint", "true")
         lay.addWidget(warn)
         # Sub-pestañas: una herramienta enfocada a la vez (menos ruido que apilar
         # los cuatro paneles). Los widgets/IDs no cambian.
@@ -332,7 +332,7 @@ class FuzzPanel(QWidget):
 
         self._ed_auto = QCheckBox("Regenerar Track2 automáticamente al editar PAN/caducidad")
         self._ed_auto.setChecked(True)
-        regen = QPushButton("↻ Track2 desde campos"); regen.clicked.connect(self._ed_regen_track2)
+        regen = QPushButton("Regenerar Track2"); regen.clicked.connect(self._ed_regen_track2)
         emit = QPushButton("Emular tarjeta editada"); emit.clicked.connect(self._ed_emit)
         emit.setProperty("accent", True)          # CTA principal del editor
         emit.setIcon(icon("play", color=ACCENT_FG))
@@ -428,5 +428,5 @@ class FuzzPanel(QWidget):
 def _desc() -> QLabel:
     lbl = QLabel("")
     lbl.setWordWrap(True)
-    lbl.setStyleSheet("color:#8b949e")
+    lbl.setProperty("hint", "true")
     return lbl

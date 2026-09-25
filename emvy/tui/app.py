@@ -19,20 +19,32 @@ from .. import palettes as _palettes
 
 def _theme_from_palette(name: str, pal: dict) -> Theme:
     """Construye un `textual.theme.Theme` desde una paleta compartida
-    (`emvy.palettes`), el mismo sistema visual que viste la GUI."""
+    (`emvy.palettes`), el mismo sistema visual que viste la GUI. Expone además
+    tokens derivados como **variables** de Textual (`$accent-muted`, `$elevated`,
+    `$border-hi`) para que las pantallas usen el mismo lenguaje que el kit GUI."""
+    from .. import palettes as _pal
+    p = _pal._derive(pal)     # garantiza tokens derivados aunque llegue crudo
     return Theme(
         name=name,
-        primary=pal["border"],
-        secondary=pal["surface2"],
-        accent=pal["accent"],
-        foreground=pal["text"],
-        background=pal["bg_deep"],
-        surface=pal["bg"],
-        panel=pal["panel"],
-        success=pal["accent"],
-        warning=pal["warning"],
-        error=pal["error"],
-        dark=pal["dark"],
+        primary=p["border"],
+        secondary=p["surface2"],
+        accent=p["accent"],
+        foreground=p["text"],
+        background=p["bg_deep"],
+        surface=p["bg"],
+        panel=p["panel"],
+        success=p["success"],
+        warning=p["warning"],
+        error=p["error"],
+        dark=p["dark"],
+        variables={
+            "accent-muted": p["accent_muted"],
+            "accent-hi": p["accent_hi"],
+            "elevated": p["surface3"],
+            "border-hi": p["border_hi"],
+            "muted": p["muted"],
+            "info": p["info"],
+        },
     )
 
 
@@ -73,48 +85,71 @@ class EmvyApp(App):
     CSS = """
     Screen { background: $surface; }
 
-    /* Cabecera/pie con fondo de panel y subrayado de pestaña en acento */
-    Header { background: $panel; color: $accent; text-style: bold; }
-    Footer { background: $panel; }
+    /* Cabecera/pie: la cabecera es una barra de contexto (fondo profundo, título
+       en acento); el pie, discreto. */
+    Header { background: $background; color: $accent; text-style: bold; }
+    HeaderTitle { text-style: bold; }
+    Footer { background: $background; color: $text-muted; }
+    Footer > .footer--key { color: $accent; text-style: bold; }
     Underline > .underline--bar { color: $accent; }
 
-    /* Encabezados de sección y ayudas contextuales (compartidos por todas las
-       pantallas para un aspecto coherente: título de pantalla, subtítulo
-       descriptivo, etiquetas de sección y pistas). */
+    /* Encabezados de sección y ayudas contextuales (lenguaje visual compartido
+       por todas las pantallas): título de página, subtítulo, etiqueta de sección
+       (overline tenue) y pistas. */
     .title {
-        text-style: bold; color: $accent;
+        text-style: bold; color: $text;
         border-bottom: heavy $primary; padding: 1 1 0 0; margin: 0 0 1 0;
     }
     .subtitle { color: $text-muted; padding: 0 0 1 0; }
-    .section  { text-style: bold; color: $accent; padding: 1 0 0 0; }
+    .section  { text-style: bold; color: $text-muted; padding: 1 0 0 0; }
     .hint  { color: $text-muted; padding: 0 0 1 0; }
+
+    /* Tarjetas: contenedor con borde redondeado (equivalente al kit GUI). Usa
+       .card (normal) o .card-hero (destacada, fondo acento tenue). */
+    .card {
+        border: round $primary; background: $panel;
+        padding: 0 1; margin: 0 0 1 0; height: auto;
+    }
+    .card-hero {
+        border: round $accent; background: $accent-muted;
+        padding: 0 1; margin: 0 0 1 0; height: auto;
+    }
 
     /* Filas de controles (input + botones) */
     .row   { height: auto; padding: 1 0; }
     .row Input { width: 1fr; margin: 0 1 0 0; }
     .row Button { margin: 0 1 0 0; min-width: 10; }
-    /* Barra de acciones compacta (botones agrupados, sin padding vertical
-       extra) — para las cabeceras de acción de cada pantalla. */
+    /* Barra de acciones compacta (botones agrupados). */
     .actions { height: auto; padding: 0 0 1 0; }
     .actions Button { margin: 0 1 0 0; min-width: 12; }
 
+    /* Botones: primaria/éxito con acento; el resto discretos. */
+    Button { border: none; }
+    Button.-primary, Button.-success { text-style: bold; }
+
     /* Tablas: cabecera y cursor destacados */
-    DataTable { height: 1fr; border: round $primary; }
+    DataTable { height: 1fr; border: round $primary; background: $panel; }
     DataTable:focus { border: round $accent; }
-    DataTable > .datatable--header { text-style: bold; background: $panel; color: $accent; }
+    DataTable > .datatable--header { text-style: bold; background: $secondary; color: $text-muted; }
     DataTable > .datatable--cursor { background: $accent; color: $text; }
+    DataTable > .datatable--hover { background: $boost; }
 
     /* Árboles / logs */
-    Tree { height: 1fr; border: round $primary; padding: 0 1; }
-    RichLog { height: 1fr; border: round $primary; padding: 0 1; }
+    Tree { height: 1fr; border: round $primary; background: $panel; padding: 0 1; }
+    Tree:focus { border: round $accent; }
+    RichLog { height: 1fr; border: round $primary; background: $panel; padding: 0 1; }
+
+    /* Entradas */
+    Input { border: tall $primary; background: $background; }
+    Input:focus { border: tall $accent; }
 
     /* Pestañas con acento profesional */
-    TabPane { padding: 0 1; }
+    TabPane { padding: 1 1; }
     Tabs:focus .-active { text-style: bold; }
     Tab.-active { color: $accent; text-style: bold; }
 
     /* Barra de estado inferior */
-    StatusBar { background: $panel; color: $text; }
+    StatusBar { background: $background; color: $text-muted; }
     """
 
     # Solo los esenciales se muestran en el footer (antes se desbordaba con 14
@@ -246,9 +281,25 @@ class EmvyApp(App):
             except Exception:
                 pass
 
+    # (id de pestaña principal) -> (id de la pantalla que aloja) para recargar
+    # SOLO la pantalla visible al cambiar de pestaña (antes se recargaban 7 a la
+    # vez, y una de ellas —Lectores— hace un escaneo de hardware de ~1.7 s, lo que
+    # congelaba CADA cambio de pestaña).
+    _TAB_SCREEN = {
+        "tab-proj": "#screen-projects", "tab-vars": "#screen-variables",
+        "tab-rdr": "#screen-readers", "tab-exp": "#screen-explorer",
+        "tab-poc": "#screen-pocs", "tab-cob": "#screen-charges",
+    }
+
     def refresh_ui(self) -> None:
-        for sid in ("#screen-dashboard", "#screen-projects", "#screen-variables",
-                    "#screen-readers", "#screen-pocs", "#screen-charges", "#screen-explorer"):
+        """Recarga **solo la pantalla activa** (barato) + el estado global
+        (dashboard/barra). El dashboard lo recarga `update_status`."""
+        try:
+            active = self.query_one("#main-tabs", TabbedContent).active
+        except Exception:
+            active = None
+        sid = self._TAB_SCREEN.get(active)
+        if sid:
             try:
                 w = self.query_one(sid)
                 if hasattr(w, "reload"):

@@ -15,13 +15,13 @@ class ReadersPanel(QWidget):
         self.win = win
         self._devices = []
 
-        sub = QLabel("Descubre los lectores de todos los backends y conecta uno "
-                     "(selecciona una fila y pulsa Conectar).")
+        sub = QLabel("Selecciona un lector y conecta."
+                     "")
         sub.setWordWrap(True)
-        sub.setStyleSheet("color:#8b949e")
+        sub.setProperty("hint", "true")
 
         self._backends = QLabel("")
-        self._backends.setStyleSheet("color:#8b949e")
+        self._backends.setProperty("hint", "true")
 
         self._table = QTableWidget(0, 4)
         self._table.setHorizontalHeaderLabels(["#", "backend", "nombre", "capacidades"])

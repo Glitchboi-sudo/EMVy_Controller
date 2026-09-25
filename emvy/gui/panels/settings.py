@@ -18,8 +18,8 @@ class SettingsPanel(QWidget):
         self.win = win
         lay = QVBoxLayout(self)
 
-        self._title = QLabel(); self._title.setStyleSheet("font-weight:700; font-size:16px;")
-        self._sub = QLabel(); self._sub.setWordWrap(True); self._sub.setStyleSheet("color:#94A3B8;")
+        self._title = QLabel(); self._title.setProperty("role", "h1")
+        self._sub = QLabel(); self._sub.setWordWrap(True); self._sub.setProperty("hint", "true")
         lay.addWidget(self._title); lay.addWidget(self._sub)
 
         cur = settingsmod.load()
@@ -48,8 +48,8 @@ class SettingsPanel(QWidget):
         lay.addLayout(self._form)
 
         self._data_hint = QLabel(); self._data_hint.setWordWrap(True)
-        self._data_hint.setStyleSheet("color:#94A3B8;")
-        self._cur_data = QLabel(); self._cur_data.setStyleSheet("color:#94A3B8;")
+        self._data_hint.setProperty("hint", "true")
+        self._cur_data = QLabel(); self._cur_data.setProperty("hint", "true")
         lay.addWidget(self._data_hint); lay.addWidget(self._cur_data)
 
         self._save = QPushButton(); self._save.setProperty("accent", True)

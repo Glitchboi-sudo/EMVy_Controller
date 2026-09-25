@@ -101,24 +101,29 @@ class DashboardScreen(VerticalScroll):
     """Centro de operaciones de EMVy Controller (orientado a estado + acciones)."""
 
     DEFAULT_CSS = """
-    DashboardScreen { padding: 0 1; }
-    DashboardScreen .dash-title { text-style: bold; color: $accent; padding: 1 0 0 0; }
+    DashboardScreen { padding: 1 1; }
+    DashboardScreen .dash-title { text-style: bold; color: $text; padding: 0; }
     DashboardScreen .dash-sub   { color: $text-muted; padding: 0 0 1 0; }
     DashboardScreen .dash-label {
-        text-style: bold; color: $accent; padding: 1 0 0 0;
+        text-style: bold; color: $text-muted; padding: 1 0 0 0;
     }
-    DashboardScreen .dash-panel {
-        border: round $primary; padding: 0 1; margin: 0 1 0 0; height: auto;
-    }
+    /* fila de tarjetas de estado (proyecto/lector/tarjeta) */
     DashboardScreen #dash-env { height: auto; }
-    DashboardScreen #dash-env Static { width: 1fr; }
+    DashboardScreen #dash-env Static {
+        width: 1fr; border: round $primary; background: $panel;
+        padding: 0 1; margin: 0 1 0 0; height: auto;
+    }
+    /* tarjeta hero: siguiente acción */
     DashboardScreen #dash-next-row {
-        border: round $accent; padding: 0 1; height: auto; margin: 0 1 0 0;
+        border: round $accent; background: $accent-muted;
+        padding: 0 1; height: auto; margin: 0 0 1 0;
     }
     DashboardScreen #dash-next { width: 1fr; padding: 0 1 0 0; }
     DashboardScreen #dash-next-btn { min-width: 20; margin: 0; }
-    DashboardScreen #dash-project { border: round $primary; padding: 0 1; height: auto; }
-    DashboardScreen #dash-recent { height: auto; max-height: 9; margin: 0 1 0 0; }
+    DashboardScreen #dash-project {
+        border: round $primary; background: $panel; padding: 0 1; height: auto;
+    }
+    DashboardScreen #dash-recent { height: auto; max-height: 9; margin: 0 0 1 0; }
     DashboardScreen .dash-actions { height: auto; padding: 1 0 0 0; }
     DashboardScreen .dash-actions Button { margin: 0 1 0 0; min-width: 8; }
     DashboardScreen .dash-newrow { height: auto; padding: 1 0 0 0; }

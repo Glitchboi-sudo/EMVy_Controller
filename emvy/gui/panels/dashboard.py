@@ -1,23 +1,23 @@
-"""Panel Inicio (GUI): **centro de operaciones**. De un vistazo: estado del
-proyecto/lector/tarjeta, el siguiente paso como acción directa, capturas y
-proyectos recientes (abribles con doble clic) y accesos rápidos. Refleja el
-estado de sesión de MainWindow y el proyecto activo.
+"""Panel Inicio (GUI): panel de operaciones **sobrio y denso** de un console de
+pentest bancario. Sin texto de ayuda obvio: estado del entorno en tarjetas KPI,
+una sugerencia de acción compacta, y capturas/proyectos en tablas. Compuesto con
+el kit (`gui.components`); reutiliza la lógica de datos (`store.*`).
 """
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QAbstractItemView, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QListWidget,
-    QListWidgetItem, QPushButton, QVBoxLayout, QWidget,
+    QAbstractItemView, QHBoxLayout, QHeaderView, QLabel, QTableWidget,
+    QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from ... import __release__, __version__
 from ...project import store
-from ..brand import brand_pixmap
-from ..icons import icon
-from ..theme import ACCENT, ACCENT_FG, MUTED, TEXT
+from ...readers import registry
+from ..components import Card, Chip, EmptyState, SectionLabel, StatCard, button
 
 
 class DashboardPanel(QWidget):
@@ -26,82 +26,80 @@ class DashboardPanel(QWidget):
         self.win = win
         self._next_action = None
 
-        # -- encabezado con la marca (mark + wordmark + versión) -----------
-        mark = QLabel(); mark.setPixmap(brand_pixmap("logo", 46, ACCENT))
-        mark.setFixedSize(mark.pixmap().size())
-        wm = QLabel(); wm.setPixmap(brand_pixmap("wordmark", 30, TEXT))
-        wm.setFixedSize(wm.pixmap().size())
-        ctrl = QLabel("Controller"); ctrl.setStyleSheet(f"color:{MUTED}; font-size:20px; font-weight:600;")
-        wmrow = QHBoxLayout(); wmrow.setSpacing(8); wmrow.setContentsMargins(0, 0, 0, 0)
-        wmrow.addWidget(wm); wmrow.addWidget(ctrl, 0, Qt.AlignBottom)
-        ver = QLabel(f"v{__version__} · {__release__} · EMV security testing & card exploration")
-        ver.setStyleSheet(f"color:{MUTED}; font-size:12px;")
-        text_col = QVBoxLayout(); text_col.setSpacing(2)
-        text_col.addLayout(wmrow); text_col.addWidget(ver)
-        head = QHBoxLayout(); head.setSpacing(14)
-        head.addWidget(mark, 0, Qt.AlignVCenter); head.addLayout(text_col); head.addStretch(1)
+        # -- fila de KPIs de estado ----------------------------------------
+        self._proj_card = StatCard("Proyecto", icon_name="folder", badge="accent")
+        self._rdr_card = StatCard("Lector", icon_name="plug", badge="neutral")
+        self._card_card = StatCard("Tarjeta", icon_name="credit-card", badge="neutral")
+        self._env_card = StatCard("Backends", icon_name="cpu", badge="neutral")
+        cards = QHBoxLayout(); cards.setSpacing(10)
+        for c in (self._proj_card, self._rdr_card, self._card_card, self._env_card):
+            cards.addWidget(c, 1)
 
-        # -- fila de tarjetas de estado ------------------------------------
-        self._proj_box, self._proj_v, self._proj_c = self._stat("Proyecto activo")
-        self._rdr_box, self._rdr_v, self._rdr_c = self._stat("Lector")
-        self._card_box, self._card_v, self._card_c = self._stat("Tarjeta · captura")
-        cards = QHBoxLayout(); cards.setSpacing(12)
-        for b in (self._proj_box, self._rdr_box, self._card_box):
-            cards.addWidget(b, 1)
-
-        # -- siguiente paso (acción directa) -------------------------------
-        step_box = QGroupBox("Siguiente paso")
-        sv = QHBoxLayout(step_box)
-        self._next_lbl = QLabel(""); self._next_lbl.setWordWrap(True)
-        self._next_lbl.setStyleSheet(f"color:{TEXT};")
-        self._next_btn = QPushButton("Continuar"); self._next_btn.setProperty("accent", True)
-        self._next_btn.setIcon(icon("play", color=ACCENT_FG))
-        self._next_btn.setMinimumWidth(160)
+        # -- sugerencia de acción (una línea, discreta) --------------------
+        strip = Card(variant="hero", margins="sm", spacing="xs")
+        srow = QHBoxLayout(); srow.setSpacing(10)
+        srow.addWidget(SectionLabel("Siguiente"), 0, Qt.AlignVCenter)
+        self._next_lbl = QLabel(""); self._next_lbl.setProperty("role", "body")
+        srow.addWidget(self._next_lbl, 1, Qt.AlignVCenter)
+        self._next_btn = button("Continuar", variant="primary")
         self._next_btn.clicked.connect(lambda: self._next_action and self._next_action())
-        sv.addWidget(self._next_lbl, 1); sv.addWidget(self._next_btn)
+        srow.addWidget(self._next_btn, 0, Qt.AlignVCenter)
+        strip.body.addLayout(srow)
 
-        # -- listas: capturas del proyecto | proyectos ---------------------
-        cap_box = QGroupBox("Capturas del proyecto  ·  doble clic para abrir")
-        self._caps = QListWidget()
-        self._caps.setSelectionBehavior(QAbstractItemView.SelectRows)
+        # -- tablas: capturas | proyectos ----------------------------------
+        cap_card = Card()
+        cap_card.body.addWidget(self._table_head("Capturas", "abrir: doble clic"))
+        self._caps = self._make_table(["Captura", "Actualizado"])
         self._caps.itemDoubleClicked.connect(self._open_capture)
-        cv = QVBoxLayout(cap_box); cv.addWidget(self._caps)
+        self._caps_empty = EmptyState("Sin capturas", icon_name="inbox")
+        cap_card.body.addWidget(self._caps, 1)
+        cap_card.body.addWidget(self._caps_empty, 1)
 
-        prj_box = QGroupBox("Proyectos  ·  doble clic para activar")
-        self._projs = QListWidget()
+        prj_card = Card()
+        prj_card.body.addWidget(self._table_head("Proyectos", "activar: doble clic"))
+        self._projs = self._make_table(["Proyecto", "Tipo"])
         self._projs.itemDoubleClicked.connect(self._activate_recent)
-        pv = QVBoxLayout(prj_box); pv.addWidget(self._projs)
+        prj_card.body.addWidget(self._projs, 1)
 
-        lists = QHBoxLayout(); lists.setSpacing(12)
-        lists.addWidget(cap_box, 1); lists.addWidget(prj_box, 1)
+        lists = QHBoxLayout(); lists.setSpacing(10)
+        lists.addWidget(cap_card, 1); lists.addWidget(prj_card, 1)
 
-        # -- accesos rápidos ------------------------------------------------
-        qa = QHBoxLayout()
-        qa.addWidget(QLabel("Accesos rápidos:"))
-        for text, ic, fn in (("Lectores", "plug", lambda: self._go("Lectores")),
-                             ("Capturar", "search", self._capture_now),
-                             ("Emular / Editor", "zap", lambda: self._go("Fuzzing")),
-                             ("Cobros", "credit-card", lambda: self._go("Cobros")),
-                             ("PoC", "flask", lambda: self._go("PoC"))):
-            b = QPushButton(text); b.setIcon(icon(ic)); b.clicked.connect(fn); qa.addWidget(b)
-        qa.addStretch(1)
+        # -- pie: uso autorizado (una línea) -------------------------------
+        foot = QHBoxLayout(); foot.setSpacing(8)
+        foot.addWidget(Chip("USO AUTORIZADO", "warn"), 0, Qt.AlignVCenter)
+        ftxt = QLabel("Laboratorio · tarjetas propias/de test · sin transacciones válidas")
+        ftxt.setProperty("role", "caption")
+        foot.addWidget(ftxt, 1, Qt.AlignVCenter)
+        fver = QLabel(f"v{__version__} · {__release__}"); fver.setProperty("role", "caption")
+        foot.addWidget(fver, 0, Qt.AlignVCenter)
 
-        lay = QVBoxLayout(self); lay.setSpacing(12)
-        lay.addLayout(head)
+        lay = QVBoxLayout(self); lay.setSpacing(10); lay.setContentsMargins(2, 2, 2, 2)
         lay.addLayout(cards)
-        lay.addWidget(step_box)
+        lay.addWidget(strip)
         lay.addLayout(lists, 1)
-        lay.addLayout(qa)
+        lay.addLayout(foot)
         self.reload()
 
     # -- helpers de UI ------------------------------------------------------
-    def _stat(self, title: str):
-        box = QGroupBox(title)
-        v = QVBoxLayout(box); v.setSpacing(2)
-        value = QLabel("—"); value.setStyleSheet(f"font-size:16px; font-weight:600; color:{TEXT};")
-        caption = QLabel(""); caption.setStyleSheet(f"color:{MUTED}; font-size:12px;")
-        v.addWidget(value); v.addWidget(caption)
-        return box, value, caption
+    @staticmethod
+    def _table_head(title: str, hint: str) -> QWidget:
+        w = QWidget(); row = QHBoxLayout(w); row.setContentsMargins(0, 0, 0, 0)
+        row.addWidget(SectionLabel(title)); row.addStretch(1)
+        row.addWidget(Chip(hint, "neutral"))
+        return w
+
+    @staticmethod
+    def _make_table(cols: list[str]) -> QTableWidget:
+        t = QTableWidget(0, len(cols))
+        t.setHorizontalHeaderLabels(cols)
+        t.verticalHeader().setVisible(False)
+        t.setSelectionBehavior(QAbstractItemView.SelectRows)
+        t.setSelectionMode(QAbstractItemView.SingleSelection)
+        t.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        t.setShowGrid(False)
+        t.horizontalHeader().setStretchLastSection(True)
+        t.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        return t
 
     # -- refresco -----------------------------------------------------------
     def reload(self) -> None:
@@ -109,58 +107,76 @@ class DashboardPanel(QWidget):
         if proj:
             nvar = len(store.load_project_variables(proj))
             caps = store.list_captures(proj)
-            self._proj_v.setText(proj.name)
-            self._proj_c.setText(f"{nvar} variables · {len(caps)} capturas")
+            self._proj_card.set_value(proj.name)
+            self._proj_card.set_caption(f"{nvar} vars · {len(caps)} capt.")
+            self._proj_card.set_status("Activo", "on")
         else:
-            self._proj_v.setText("Sin proyecto")
-            self._proj_c.setText("crea/activa uno en Proyectos")
+            self._proj_card.set_value("—")
+            self._proj_card.set_caption("ninguno activo")
+            self._proj_card.set_status("", "off")
             caps = []
 
         rdr = self.win.reader_device.name if self.win.reader_device else None
-        self._rdr_v.setText(rdr or "Desconectado")
-        self._rdr_c.setText(f"{self.win.reader_device.backend}" if rdr else "pulsa Lectores")
+        self._rdr_card.set_value(rdr or "—")
+        self._rdr_card.set_caption(self.win.reader_device.backend if rdr else "desconectado")
+        self._rdr_card.set_status("Online" if rdr else "", "on" if rdr else "off")
 
         dump = self.win.last_dump
-        self._card_v.setText(self.win.card_atr[:22] + "…" if (self.win.card_atr and
-                             len(self.win.card_atr) > 23) else (self.win.card_atr or
-                             ("Sin tarjeta" if rdr else "Sin lector")))
-        self._card_c.setText(f"captura: {len(dump.applications)} app · {len(dump.blobs)} blobs"
-                             if dump else "sin captura")
+        atr = self.win.card_atr
+        self._card_card.set_value("Presente" if atr else "—")
+        self._card_card.set_caption(
+            f"{len(dump.applications)} app · {len(dump.blobs)} blobs" if dump else "sin captura")
+        self._card_card.set_status("Capturada" if dump else "", "on" if dump else "off")
 
-        # siguiente paso + acción
+        # backends disponibles (dato de entorno, denso)
+        try:
+            b = registry.available_backends()
+            up = [n for n, ok in b.items() if ok]
+            self._env_card.set_value(f"{len(up)}/{len(b)}")
+            self._env_card.set_caption(" ".join(up) if up else "ninguno")
+        except Exception:
+            self._env_card.set_value("—"); self._env_card.set_caption("")
+
+        # sugerencia de acción (terse)
         if not proj:
-            self._set_next("Crea o selecciona un proyecto para empezar.",
-                           "Ir a Proyectos", lambda: self._go("Proyectos"))
+            self._set_next("sin proyecto activo", "Proyectos", lambda: self._go("Proyectos"))
         elif not rdr:
-            self._set_next("Conecta un lector (PC/SC, NFC o BomberCat).",
-                           "Conectar lector", lambda: self._go("Lectores"))
+            self._set_next("lector desconectado", "Conectar", lambda: self._go("Lectores"))
         elif dump is None:
-            self._set_next("Captura una tarjeta para inspeccionar su árbol TLV.",
-                           "Capturar tarjeta", self._capture_now)
+            self._set_next("sin captura en sesión", "Capturar", self._capture_now)
         else:
-            self._set_next("Tarjeta capturada. Explórala, emúlala o busca flags.",
-                           "Ir a Fuzzing", lambda: self._go("Fuzzing"))
+            self._set_next("captura lista", "Explorar", lambda: self._go("Explorador"))
 
-        # capturas del proyecto (recientes primero)
-        self._caps.clear()
+        # capturas (recientes primero)
+        self._caps.setRowCount(0)
         for p in sorted(caps, key=lambda x: x.stat().st_mtime, reverse=True):
-            it = QListWidgetItem(p.stem)
-            it.setData(Qt.UserRole, str(p))
-            self._caps.addItem(it)
-        if not caps:
-            self._caps.addItem(QListWidgetItem("(sin capturas — captura una tarjeta)"))
+            when = datetime.fromtimestamp(p.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+            self._add_row(self._caps, [p.stem, when], data=str(p))
+        has_caps = bool(caps)
+        self._caps.setVisible(has_caps)
+        self._caps_empty.setVisible(not has_caps)
 
         # proyectos
-        self._projs.clear()
-        projs = store.list_projects()
+        self._projs.setRowCount(0)
+        xdg = store.list_projects()
+        xdg_names = {p.name for p in xdg}
+        rows = [(p, "XDG") for p in xdg]
         try:
-            projs = projs + [p for p in store.list_path_projects() if p not in projs]
+            rows += [(p, "engagement") for p in store.list_path_projects()
+                     if p.name not in xdg_names]
         except Exception:
             pass
-        for p in projs:
-            it = QListWidgetItem(p.name)
-            it.setData(Qt.UserRole, (p.name, getattr(p, "path", None)))
-            self._projs.addItem(it)
+        for p, kind in rows:
+            self._add_row(self._projs, [p.name, kind], data=(p.name, getattr(p, "path", None)))
+
+    @staticmethod
+    def _add_row(t: QTableWidget, values: list[str], *, data) -> None:
+        r = t.rowCount(); t.insertRow(r)
+        for c, v in enumerate(values):
+            it = QTableWidgetItem(v)
+            if c == 0:
+                it.setData(Qt.UserRole, data)
+            t.setItem(r, c, it)
 
     def _set_next(self, text: str, btn: str, action) -> None:
         self._next_lbl.setText(text)
@@ -168,8 +184,8 @@ class DashboardPanel(QWidget):
         self._next_action = action
 
     # -- acciones -----------------------------------------------------------
-    def _open_capture(self, item: QListWidgetItem) -> None:
-        path = item.data(Qt.UserRole)
+    def _open_capture(self, item: QTableWidgetItem) -> None:
+        path = self._caps.item(item.row(), 0).data(Qt.UserRole)
         if not path:
             return
         try:
@@ -180,10 +196,10 @@ class DashboardPanel(QWidget):
         self.win.last_dump = dump
         self.win.explorer_panel.show_dump(dump)
         self._go("Explorador")
-        self.win.notify.emit(f"Captura abierta en el Explorador: {item.text()}")
+        self.win.notify.emit(f"Captura abierta: {Path(path).stem}")
 
-    def _activate_recent(self, item: QListWidgetItem) -> None:
-        data = item.data(Qt.UserRole)
+    def _activate_recent(self, item: QTableWidgetItem) -> None:
+        data = self._projs.item(item.row(), 0).data(Qt.UserRole)
         if not data:
             return
         name, path = data

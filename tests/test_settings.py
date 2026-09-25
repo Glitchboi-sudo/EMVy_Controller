@@ -24,8 +24,18 @@ def test_all_palettes_have_all_tokens():
 
 def test_palette_get_falls_back_to_default():
     from emvy import palettes
-    assert palettes.get("no-existe") is palettes.PALETTES[palettes.DEFAULT]
+    # get() devuelve una copia derivada (con tokens derivados), no la definición
+    # cruda; un nombre inexistente cae a la de por defecto (misma por valor).
+    assert palettes.get("no-existe") == palettes.get(palettes.DEFAULT)
     assert [n for n, _ in palettes.names()][0] == palettes.DEFAULT
+
+
+def test_palette_get_fills_derived_tokens():
+    from emvy import palettes
+    for name, _ in palettes.names():
+        pal = palettes.get(name)
+        for tok in palettes._DERIVED:
+            assert tok in pal, (name, tok)
 
 
 # --- i18n ------------------------------------------------------------------

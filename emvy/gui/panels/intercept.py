@@ -25,9 +25,9 @@ class InterceptPanel(QWidget):
     def __init__(self, win) -> None:
         super().__init__()
         self.win = win
-        sub = QLabel("Reglas MITM sobre los APDU de la sesión. Al activar, capturas/PoCs/"
-                     "escritura pasan por ellas. Cada intercambio afectado se registra abajo.")
-        sub.setWordWrap(True); sub.setStyleSheet("color:#8b949e")
+        sub = QLabel("Reglas MITM sobre los APDU de la sesión."
+                     "")
+        sub.setWordWrap(True); sub.setProperty("hint", "true")
 
         self._rules = QPlainTextEdit(); self._rules.setFont(_MONO)
         self._rules.setPlaceholderText(_EXAMPLE)
@@ -47,7 +47,7 @@ class InterceptPanel(QWidget):
         rules, errors = self.win.apply_intercept(self._rules.toPlainText())
         self._log.appendPlainText(f"Reglas aplicadas: {len(rules)}")
         for e in errors:
-            self._log.appendPlainText(f"  ⚠ {e}")
+            self._log.appendPlainText(f"  ! {e}")
 
     def _toggle(self, on: bool) -> None:
         if on and not self.win.intercept_rules:

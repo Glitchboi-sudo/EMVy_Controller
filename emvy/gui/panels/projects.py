@@ -15,8 +15,8 @@ class ProjectsPanel(QWidget):
         self.win = win
         self._rows: list[tuple[str, object]] = []
 
-        sub = QLabel("Espacios de trabajo (XDG o en ruta/engagements). Marca ● = activo.")
-        sub.setStyleSheet("color:#8b949e")
+        sub = QLabel("Espacios de trabajo (XDG o engagements en ruta).")
+        sub.setProperty("hint", "true")
 
         self._table = QTableWidget(0, 4)
         self._table.setHorizontalHeaderLabels(["", "nombre", "creado", "descripción"])

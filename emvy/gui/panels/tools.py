@@ -58,12 +58,17 @@ class _FlagsTool(QWidget):
     def __init__(self, win) -> None:
         super().__init__()
         self.win = win
-        self._pat = QLineEdit(r"flag\{[^}]+\}")
-        search = QPushButton("Buscar patrón"); search.clicked.connect(self._search)
-        default = QPushButton("Patrones por defecto"); default.clicked.connect(self._default)
-        row = QHBoxLayout(); row.addWidget(self._pat, 1); row.addWidget(search); row.addWidget(default)
-        self._log = _log()
-        lay = QVBoxLayout(self); lay.addLayout(row); lay.addWidget(self._log, 1)
+        from ..components import Card, SectionLabel, button, primary_button
+        self._pat = QLineEdit(r"flag\{[^}]+\}"); self._pat.setPlaceholderText("patrón regex")
+        search = primary_button("Buscar"); search.clicked.connect(self._search)
+        default = button("Por defecto"); default.clicked.connect(self._default)
+        row = QHBoxLayout(); row.setSpacing(8)
+        row.addWidget(self._pat, 1); row.addWidget(search); row.addWidget(default)
+        card = Card(margins="sm", spacing="xs")
+        card.body.addWidget(SectionLabel("Coincidencias"))
+        self._log = _log(); card.body.addWidget(self._log, 1)
+        lay = QVBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(10)
+        lay.addLayout(row); lay.addWidget(card, 1)
 
     def _dump(self):
         d = self.win.last_dump
@@ -125,9 +130,17 @@ class _IsoTool(QWidget):
         row2.addWidget(build); row2.addWidget(self._host, 1)
         row2.addWidget(self._port); row2.addWidget(self._hdr); row2.addWidget(send)
 
-        self._log = _log()
-        lay = QVBoxLayout(self)
-        lay.addLayout(row1); lay.addWidget(self._table); lay.addLayout(row2); lay.addWidget(self._log, 1)
+        from ..components import Card, SectionLabel
+        fields = Card(margins="sm", spacing="xs")
+        fields.body.addWidget(SectionLabel("Campos del mensaje"))
+        fields.body.addLayout(row1); fields.body.addWidget(self._table, 1)
+        sendc = Card(margins="sm", spacing="xs")
+        sendc.body.addWidget(SectionLabel("Enviar")); sendc.body.addLayout(row2)
+        outc = Card(margins="sm", spacing="xs")
+        outc.body.addWidget(SectionLabel("Salida"))
+        self._log = _log(); outc.body.addWidget(self._log, 1)
+        lay = QVBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(10)
+        lay.addWidget(fields, 1); lay.addWidget(sendc); lay.addWidget(outc, 1)
 
     def _refresh(self) -> None:
         self._des = sorted(self._fields)
@@ -213,18 +226,18 @@ class _CardWriteTool(QWidget):
         lay.setSpacing(8)
 
         title = QLabel("Escritura en tarjeta"); title.setProperty("section", True)
-        title.setStyleSheet("font-weight:700; font-size:15px;")
+        title.setProperty("role", "h2")
         lay.addWidget(title)
 
         # -- barra de canal seguro (compartida por Personalizar + Avanzado) --
         self._keyset = QComboBox()
         self._enc = QCheckBox("C-ENC")
-        refresh = QPushButton("↻"); refresh.setFixedWidth(32); refresh.clicked.connect(self.refresh_keysets)
+        refresh = QPushButton("Recargar"); refresh.clicked.connect(self.refresh_keysets)
         bar = QHBoxLayout()
-        lk = QLabel("🔒 Canal seguro · keyset:")
+        lk = QLabel("Canal seguro · keyset:")
         bar.addWidget(lk); bar.addWidget(self._keyset, 1); bar.addWidget(self._enc); bar.addWidget(refresh)
         self._sec_hint = QLabel()
-        self._sec_hint.setStyleSheet("color:#94A3B8;")
+        self._sec_hint.setProperty("hint", "true")
         self._keyset.currentTextChanged.connect(self._update_sec_hint)
         lay.addLayout(bar); lay.addWidget(self._sec_hint)
 
@@ -245,9 +258,9 @@ class _CardWriteTool(QWidget):
     # -- páginas ------------------------------------------------------------
     def _page_personalize(self) -> QWidget:
         w = QWidget(); v = QVBoxLayout(w)
-        sub = QLabel("Elige un preset o rellena los campos; se genera un registro EMV "
-                     "(5A/57/5F24/5F20) y se escribe en SFI 1 · registro 1.")
-        sub.setWordWrap(True); sub.setStyleSheet("color:#94A3B8;")
+        sub = QLabel("Preset o campos → registro EMV en SFI 1 · registro 1."
+                     "")
+        sub.setWordWrap(True); sub.setProperty("hint", "true")
         v.addWidget(sub)
 
         self._preset = QComboBox()
@@ -294,10 +307,10 @@ class _CardWriteTool(QWidget):
         # grupo A: escritura directa (APDU)
         direct = QGroupBox("Escritura directa (APDU)")
         dv = QVBoxLayout(direct)
-        warn = QLabel("⚠ Modifica la tarjeta (puede ser irreversible). Solo tarjetas "
+        warn = QLabel("Aviso: modifica la tarjeta (puede ser irreversible). Solo tarjetas "
                       "propias/de laboratorio. Si la tarjeta pide canal seguro, se "
                       "autentica sola con el keyset de arriba.")
-        warn.setWordWrap(True); warn.setStyleSheet("color:#94A3B8;")
+        warn.setWordWrap(True); warn.setProperty("hint", "true")
         self._op = QComboBox()
         for label, val in _OPS:
             self._op.addItem(label, val)
@@ -325,7 +338,7 @@ class _CardWriteTool(QWidget):
         gph = QLabel("Prepara una tarjeta EMV para poder escribir: instala un CAP EMV "
                      "abierto, o instancia un applet ya cargado (GET STATUS lista los "
                      "módulos). Luego personaliza en la pestaña «Personalizar».")
-        gph.setWordWrap(True); gph.setStyleSheet("color:#94A3B8;")
+        gph.setWordWrap(True); gph.setProperty("hint", "true")
         auth = QPushButton("Probar autenticación"); auth.clicked.connect(lambda: self._gp("auth"))
         status = QPushButton("Ver contenido (GET STATUS)"); status.clicked.connect(lambda: self._gp("status"))
         install = QPushButton("Instalar CAP EMV…"); install.clicked.connect(self._install)

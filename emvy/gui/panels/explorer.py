@@ -79,77 +79,81 @@ class ExplorerPanel(QWidget):
         self.win = win
         self._sel: dict | None = None
 
-        sub = QLabel("Captura una tarjeta, inspecciona su árbol TLV y exporta lo que "
-                     "encuentres. «Dump crudo» se adapta al lector (NFC en BomberCat).")
-        sub.setWordWrap(True); sub.setStyleSheet("color:#8b949e")
+        from ..components import Card, SectionCard, SectionLabel, button, primary_button
+        self._SectionCard, self._button, self._primary = SectionCard, button, primary_button
 
-        cap = QPushButton("● Capturar"); cap.clicked.connect(lambda: self.win.capture("auto"))
-        raw = QPushButton("◐ Dump crudo"); raw.clicked.connect(self._dump_raw)
-        ana = QPushButton("🔒 Analizar"); ana.clicked.connect(self._analyze)
-        clr = QPushButton("Limpiar"); clr.clicked.connect(self._clear)
-        actions = QHBoxLayout()
-        for b in (cap, raw, ana, clr):
-            actions.addWidget(b)
-        actions.addStretch(1)
+        cap = primary_button("Capturar"); cap.clicked.connect(lambda: self.win.capture("auto"))
+        raw = button("Dump crudo"); raw.clicked.connect(self._dump_raw)
+        raw.setToolTip("Se adapta al lector (NFC en BomberCat)")
+        ana = button("Analizar"); ana.clicked.connect(self._analyze)
+        clr = button("Limpiar", variant="ghost"); clr.clicked.connect(self._clear)
+        bar = QHBoxLayout(); bar.setSpacing(8)
+        bar.addWidget(cap); bar.addWidget(raw); bar.addWidget(ana)
+        bar.addStretch(1); bar.addWidget(clr)
 
+        tree_card = Card(margins="sm", spacing="xs")
+        tree_card.body.addWidget(SectionLabel("Árbol TLV"))
         self._tree = QTreeWidget()
         self._tree.setColumnCount(2)
         self._tree.setHeaderLabels(["campo", "valor"])
         self._tree.setColumnWidth(0, 320)
         self._tree.setAlternatingRowColors(True)
+        self._tree.setRootIsDecorated(True)
         self._tree.currentItemChanged.connect(self._on_item)
+        tree_card.body.addWidget(self._tree, 1)
 
         splitter = QSplitter(Qt.Horizontal)
-        splitter.addWidget(self._tree)
+        splitter.addWidget(tree_card)
         splitter.addWidget(self._inspector())
         splitter.setStretchFactor(0, 2)
         splitter.setStretchFactor(1, 1)
+        splitter.setHandleWidth(8)
 
-        lay = QVBoxLayout(self)
-        lay.addWidget(sub)
-        lay.addLayout(actions)
+        lay = QVBoxLayout(self); lay.setSpacing(10); lay.setContentsMargins(2, 2, 2, 2)
+        lay.addLayout(bar)
         lay.addWidget(splitter, 1)
         self.reload()
 
     def _inspector(self) -> QWidget:
+        SectionCard, button, primary_button = self._SectionCard, self._button, self._primary
         w = QWidget()
-        v = QVBoxLayout(w)
+        v = QVBoxLayout(w); v.setContentsMargins(0, 0, 0, 0); v.setSpacing(10)
 
-        nodo = QGroupBox("Nodo seleccionado")
-        nv = QVBoxLayout(nodo)
+        nodo = SectionCard("Nodo seleccionado", margins="md", spacing="sm")
         self._detail = QLabel("Selecciona un nodo del árbol.")
-        self._detail.setWordWrap(True); self._detail.setTextInteractionFlags(
-            Qt.TextSelectableByMouse)
-        nv.addWidget(self._detail)
-        cprow = QHBoxLayout()
-        chex = QPushButton("Copiar hex"); chex.clicked.connect(lambda: self._copy("value"))
-        casc = QPushButton("Copiar ASCII"); casc.clicked.connect(lambda: self._copy("ascii"))
-        ctv = QPushButton("tag=val"); ctv.clicked.connect(self._copy_tagval)
+        self._detail.setWordWrap(True); self._detail.setProperty("role", "mono")
+        self._detail.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        nodo.body.addWidget(self._detail)
+        cprow = QHBoxLayout(); cprow.setSpacing(6)
+        chex = button("Copiar hex"); chex.clicked.connect(lambda: self._copy("value"))
+        casc = button("Copiar ASCII"); casc.clicked.connect(lambda: self._copy("ascii"))
+        ctv = button("tag=val"); ctv.clicked.connect(self._copy_tagval)
         for b in (chex, casc, ctv):
             cprow.addWidget(b)
-        nv.addLayout(cprow)
+        cprow.addStretch(1)
+        nodo.body.addLayout(cprow)
         v.addWidget(nodo)
 
-        asig = QGroupBox("Asignar a variable")
-        av = QVBoxLayout(asig)
+        asig = SectionCard("Asignar a variable", margins="md", spacing="sm")
         self._varname = QLineEdit(); self._varname.setPlaceholderText(
-            "destino (tag/alias/nombre; vacío = sugerido)")
-        av.addWidget(self._varname)
-        crow = QHBoxLayout()
+            "tag/alias/nombre · vacío = sugerido")
+        asig.body.addWidget(self._varname)
+        crow = QHBoxLayout(); crow.setSpacing(8)
         self._var_user = QCheckBox("libre"); self._var_ascii = QCheckBox("ASCII")
-        assign = QPushButton("→ Variable"); assign.clicked.connect(self._assign)
+        assign = primary_button("Asignar"); assign.clicked.connect(self._assign)
         crow.addWidget(self._var_user); crow.addWidget(self._var_ascii)
-        crow.addWidget(assign); crow.addStretch(1)
-        av.addLayout(crow)
+        crow.addStretch(1); crow.addWidget(assign)
+        asig.body.addLayout(crow)
         v.addWidget(asig)
 
-        guardar = QGroupBox("Guardar captura")
-        gv = QVBoxLayout(guardar)
+        guardar = SectionCard("Guardar captura", margins="md", spacing="sm")
         self._dest = QComboBox()
         self._savename = QLineEdit(); self._savename.setPlaceholderText(
             "nombre (o ruta .json si destino=archivo)")
-        save = QPushButton("Guardar"); save.clicked.connect(self._save)
-        gv.addWidget(self._dest); gv.addWidget(self._savename); gv.addWidget(save)
+        save = primary_button("Guardar"); save.clicked.connect(self._save)
+        guardar.body.addWidget(self._dest); guardar.body.addWidget(self._savename)
+        srow = QHBoxLayout(); srow.addStretch(1); srow.addWidget(save)
+        guardar.body.addLayout(srow)
         v.addWidget(guardar)
         v.addStretch(1)
         return w
@@ -299,7 +303,7 @@ class ExplorerPanel(QWidget):
             self.win.notify.emit("La captura no tiene datos de aplicación.")
             return
         a = analyze.assess(tlvs)
-        root = QTreeWidgetItem(["🔒 ANÁLISIS DE SEGURIDAD", ""])
+        root = QTreeWidgetItem(["ANÁLISIS DE SEGURIDAD", ""])
         caps = QTreeWidgetItem(["Capacidades / CVM / ODA", ""])
         for line in a.summary().splitlines():
             caps.addChild(QTreeWidgetItem([line, ""]))
@@ -336,7 +340,7 @@ class ExplorerPanel(QWidget):
                 it = QTreeWidgetItem(["AFL", app["afl"]]); it.setData(0, _DATA, _hexdata("94", app["afl"]))
                 top.addChild(it)
             for line in app.get("ndef_records") or []:
-                it = QTreeWidgetItem(["★ NDEF", line]); it.setData(0, _DATA, _textdata(line, "ndef"))
+                it = QTreeWidgetItem(["NDEF", line]); it.setData(0, _DATA, _textdata(line, "ndef"))
                 top.addChild(it)
             fci = blobs.get(f"{aid}:FCI")
             if fci:

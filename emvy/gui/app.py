@@ -17,8 +17,8 @@ import sys
 from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
-    QApplication, QDockWidget, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
-    QMainWindow, QStatusBar, QTabWidget, QWidget,
+    QApplication, QDockWidget, QFrame, QHBoxLayout, QLabel, QListWidget,
+    QListWidgetItem, QMainWindow, QStatusBar, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from .. import __release__, __version__, i18n
@@ -146,10 +146,21 @@ class MainWindow(QMainWindow):
         # el QTabWidget conserva las páginas (y `self.tabs` sigue siendo la API)
         # pero su barra de pestañas se oculta y se conduce desde la lista lateral.
         self.tabs.tabBar().hide()
+        self.tabs.setObjectName("main-tabs")
         self.nav = self._build_sidebar()
+        # riel izquierdo: marca + navegación (un único contenedor estilizado)
+        sidebar = QWidget(); sidebar.setObjectName("sidebar"); sidebar.setFixedWidth(228)
+        lv = QVBoxLayout(sidebar); lv.setContentsMargins(0, 0, 0, 0); lv.setSpacing(0)
+        lv.addWidget(self._build_brand())
+        lv.addWidget(self.nav, 1)
+        # columna derecha: barra superior de contexto + contenido
+        right = QWidget()
+        rv = QVBoxLayout(right); rv.setContentsMargins(0, 0, 0, 0); rv.setSpacing(0)
+        rv.addWidget(self._build_topbar())
+        rv.addWidget(self.tabs, 1)
         central = QWidget()
         h = QHBoxLayout(central); h.setContentsMargins(0, 0, 0, 0); h.setSpacing(0)
-        h.addWidget(self.nav); h.addWidget(self.tabs, 1)
+        h.addWidget(sidebar); h.addWidget(right, 1)
         self.setCentralWidget(central)
         # La consola cruda solo es útil donde hay tráfico con el hardware; se
         # oculta en Inicio/Proyectos/Variables para una vista más limpia.
@@ -197,13 +208,16 @@ class MainWindow(QMainWindow):
     def _build_sidebar(self) -> QListWidget:
         from .icons import icon
         nav = QListWidget(); nav.setObjectName("nav")
-        nav.setFixedWidth(198); nav.setIconSize(QSize(18, 18))
+        nav.setIconSize(QSize(17, 17))
         nav.setUniformItemSizes(False)
         self._nav_to_tab: dict[int, int] = {}
         self._nav_headers: list[tuple] = []      # (row, group_key) para retraducir
         self._nav_items: list[tuple] = []        # (row, tab_id) para retraducir
+        self._tab_group: dict[str, str] = {}     # tab_id -> group_key (para el breadcrumb)
         first_row = None
         for gkey, items in self._NAV_GROUPS:
+            for tab_id, _ic in items:
+                self._tab_group[tab_id] = gkey
             hdr = QListWidgetItem(i18n.t(gkey)); hdr.setFlags(Qt.NoItemFlags)
             nav.addItem(hdr); self._nav_headers.append((nav.row(hdr), gkey))
             for tab_id, ic in items:
@@ -221,6 +235,61 @@ class MainWindow(QMainWindow):
             nav.setCurrentRow(first_row)
         return nav
 
+    def _build_brand(self) -> QWidget:
+        """Marca en la cabecera del riel: logo + nombre + descriptor (overline)."""
+        from .brand import brand_pixmap
+        from .theme import ACCENT
+        w = QWidget(); w.setObjectName("brand-lockup")
+        row = QHBoxLayout(w); row.setContentsMargins(16, 16, 14, 16); row.setSpacing(11)
+        mark = QLabel(); mark.setPixmap(brand_pixmap("logo", 26, ACCENT))
+        mark.setFixedSize(mark.pixmap().size())
+        col = QVBoxLayout(); col.setSpacing(0)
+        name = QLabel("EMVy"); name.setObjectName("brand-name")
+        sub = QLabel("PENTEST CONSOLE"); sub.setObjectName("brand-sub")
+        col.addWidget(name); col.addWidget(sub)
+        row.addWidget(mark, 0, Qt.AlignVCenter); row.addLayout(col); row.addStretch(1)
+        return w
+
+    def _build_topbar(self) -> QFrame:
+        """Barra superior de contexto: título + breadcrumb, chips de sesión
+        (proyecto / lector / tarjeta) y una acción rápida primaria."""
+        from .components import Chip, button
+        bar = QFrame(); bar.setObjectName("topbar"); bar.setFixedHeight(52)
+        row = QHBoxLayout(bar); row.setContentsMargins(20, 6, 16, 6); row.setSpacing(10)
+
+        titlecol = QVBoxLayout(); titlecol.setSpacing(1)
+        self._page_title = QLabel("Inicio"); self._page_title.setObjectName("topbar-title")
+        self._crumb = QLabel(""); self._crumb.setObjectName("topbar-crumb")
+        titlecol.addWidget(self._page_title); titlecol.addWidget(self._crumb)
+        row.addLayout(titlecol, 0)
+        row.addStretch(1)
+
+        self._chip_proj = Chip("Sin proyecto", "neutral")
+        self._chip_rdr = Chip("Sin lector", "off")
+        self._chip_card = Chip("Sin tarjeta", "off")
+        for c in (self._chip_proj, self._chip_rdr, self._chip_card):
+            row.addWidget(c, 0, Qt.AlignVCenter)
+        self._topbar_cta = button("Capturar", variant="primary", icon_name="search",
+                                  on_click=lambda: self._quick_capture())
+        row.addWidget(self._topbar_cta, 0, Qt.AlignVCenter)
+        return bar
+
+    def _quick_capture(self) -> None:
+        """Acción rápida de la barra superior: va al Explorador y captura."""
+        try:
+            self.tabs.setCurrentIndex(self._tab_id_index("explorer"))
+        except Exception:
+            pass
+        self.capture("auto")
+
+    def _set_page_title(self, tab_id: str) -> None:
+        if not (hasattr(self, "_page_title") and tab_id):
+            return
+        self._page_title.setText(i18n.t("nav." + tab_id))
+        gkey = getattr(self, "_tab_group", {}).get(tab_id)
+        crumb = i18n.t(gkey) if gkey else ""
+        self._crumb.setText(f"{crumb}  ›  {i18n.t('nav.' + tab_id)}" if crumb else "")
+
     # -- idioma / tema en vivo --------------------------------------------
     def retranslate(self) -> None:
         """Reaplica el idioma a las etiquetas de pestañas y barra lateral (el
@@ -231,6 +300,9 @@ class MainWindow(QMainWindow):
             self.nav.item(row).setText(i18n.t(gkey))
         for row, tab_id in getattr(self, "_nav_items", []):
             self.nav.item(row).setText(i18n.t("nav." + tab_id))
+        idx = self.tabs.currentIndex()
+        if 0 <= idx < len(self._tab_ids):
+            self._set_page_title(self._tab_ids[idx])
         try:
             self.settings_panel.retranslate()
         except Exception:
@@ -251,6 +323,7 @@ class MainWindow(QMainWindow):
 
     def _on_tab_changed(self, index: int) -> None:
         tab_id = self._tab_ids[index] if 0 <= index < len(self._tab_ids) else ""
+        self._set_page_title(tab_id)
         self._console_dock.setVisible(tab_id in self._CONSOLE_TAB_IDS)
         if tab_id == "tools":
             self.tools_panel.gp_refresh()      # keysets del proyecto activo
@@ -291,9 +364,16 @@ class MainWindow(QMainWindow):
         if proj is None:
             p = store.active_project()
             proj = p.name if p else "—"
-        rdr = self.reader_device.name if self.reader_device else "—"
-        crd = self.card_atr or "—"
-        self._status.setText(f"  proyecto: {proj}    │    lector: {rdr}    │    tarjeta: {crd}")
+        has_proj = bool(proj) and proj != "—"
+        rdr = self.reader_device.name if self.reader_device else None
+        self._status.setText("")
+        # chips de sesión en la barra superior (color según estado)
+        if hasattr(self, "_chip_proj"):
+            self._chip_proj.set_chip(proj if has_proj else "Sin proyecto",
+                                     "accent" if has_proj else "neutral")
+            self._chip_rdr.set_chip(rdr if rdr else "Sin lector", "on" if rdr else "off")
+            self._chip_card.set_chip("Tarjeta lista" if self.card_atr else "Sin tarjeta",
+                                     "on" if self.card_atr else "off")
         try:
             self.dashboard_panel.reload()
         except Exception:
