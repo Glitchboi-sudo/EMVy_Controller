@@ -26,6 +26,10 @@ _EMV_JSON = {
 class FakeSerial:
     """Emula la placa: procesa líneas escritas y encola respuestas."""
 
+    # Estado de emulación a NIVEL CLASE: persiste entre conexiones serie como
+    # la RAM del firmware real (una sesión huérfana sobrevive al reabrir el puerto).
+    _emulating = False
+
     def __init__(self, port, baud, timeout=1, dsrdtr=False, rtscts=False, **kw):
         self.port = port
         self.baudrate = baud
@@ -34,7 +38,6 @@ class FakeSerial:
         self._in = bytearray()     # líneas pendientes del host
         self._out = bytearray()    # bytes listos para readline()
         self._card, _ = build_fake_card()
-        self._emulating = False    # estado de emulación NDEF (comando EMU:)
 
     # -- API pyserial usada por el backend ---------------------------------
     def reset_input_buffer(self):
@@ -70,56 +73,77 @@ class FakeSerial:
     def _handle(self, line: str):
         if not line:
             return
-        if line == "PING":
+        up = line.upper()
+        if up == "PING":
             self._emit("PONG")
-        elif line.startswith("WAIT"):
+        elif up == "INFO":
+            # dialecto local EMVyBomberCat: :role + :state (el rework upstream
+            # NO emite :role). El estado refleja la emulación activa, como el
+            # firmware real (gEmuActive → emulating).
+            self._emit(":fw_name emvybombercat")
+            self._emit(":fw 1.1")
+            self._emit(":role emv-multitool")
+            self._emit(":state emulating" if FakeSerial._emulating else ":state idle")
+            self._emit("+OK")
+        elif up.startswith("WAIT"):
             self._emit("READY:")
-        elif line.startswith("APDU:"):
+        elif up.startswith("APDU:"):
             resp = self._card(from_hex(line[5:]))
             self._emit("RESP:" + to_hex(resp.data + bytes([resp.sw1, resp.sw2])))
-        elif line == "RELEASE":
-            if self._emulating:
-                self._emulating = False
+        elif up == "RELEASE":
+            if FakeSerial._emulating:
+                FakeSerial._emulating = False
                 self._emit("EMU:DONE sent=1 reason=release")
             else:
                 self._emit("OK")
-        elif line in ("REBOOT", "RESET"):
+        elif up in ("REBOOT", "RESET"):
             # el firmware real reinicia el MCU; el falso solo confirma la línea
             self._emit("# REBOOT")
-        elif line == "STOP":
-            if self._emulating:
-                self._emulating = False
+        elif up == "STOP":
+            if FakeSerial._emulating:
+                FakeSerial._emulating = False
                 self._emit("EMU:DONE sent=1 reason=stop")
             else:
                 self._emit("OK")
-        elif line == "CARDSCAN" or line.startswith("CARDSCAN "):
+        elif up == "CARDSCAN" or up.startswith("CARDSCAN "):
             # Simula leer una tarjeta y guardarla en la RAM del firmware.
             self._ram_card = {"aid": "A0000000031010", "pan": "4111111111111111",
                               "exp": "2909"}
             self._emit("# CARDSCAN: acerca la tarjeta contactless a leer...")
             self._emit(f"EMU:SCANNED aid={self._ram_card['aid']} "
                        f"pan={self._ram_card['pan']} exp={self._ram_card['exp']} t2len=19")
-        elif line.startswith("EMUEMV"):
+        elif up.startswith("EMUEMV"):
             # Emulación de tarjeta EMV: simula el flujo de un terminal de pago
             # (PPSE → SELECT AID → GPO con PDOL decodificado → READ RECORD →
             # GENERATE AC con CDOL1), como el firmware nuevo. Activa hasta STOP.
             # `EMUEMV:<aid>|<pan>|<exp>|<track2>` inyecta desde host; `EMUEMV:RAM`
             # usa la tarjeta guardada por CARDSCAN. Refleja el AID resultante.
+            # Como el firmware: si ya había una emulación activa, el comando la
+            # reemplaza y primero se reporta su `EMU:DONE reason=restart`.
+            if FakeSerial._emulating:
+                FakeSerial._emulating = False
+                self._emit("EMU:DONE sent=0 reason=restart")
             aid, scheme = "A0000000031010", "VISA"
+            cid = "40"                                    # default del host: TC
             if ":" in line:
                 rest = line.split(":", 1)[1].strip()
-                if rest.upper() == "RAM":
+                if rest.upper().startswith("RAM"):
                     ram = getattr(self, "_ram_card", None)
                     if ram:
                         aid = ram["aid"]
+                    if "|" in rest:                       # RAM|<cid>
+                        cid = rest.split("|", 1)[1].strip() or cid
                 else:
-                    fields = (rest + "|||").split("|")
+                    fields = (rest + "||||").split("|")
+                    cid = (fields[4] or cid).upper()
                     self._emit(f"EMU:CARD aid={len(fields[0])//2 if fields[0] else 0} "
                                f"pan={len(fields[1])//2 if fields[1] else 0} "
                                f"exp={len(fields[2])//2 if fields[2] else 0} "
-                               f"t2={len(fields[3])//2 if fields[3] else 0}")
+                               f"t2={len(fields[3])//2 if fields[3] else 0} "
+                               f"cid={cid}")
                     if fields[0]:
                         aid = fields[0].upper()
+            da = {"40": "TC", "80": "ARQC", "00": "AAC"}.get(cid, cid)
             self._emit("EMU:START mode=emv")
             self._emit("EMU:RX SELECT-PPSE 2PAY.SYS.DDF01 00A404000E325041592E5359532E444446303100")
             self._emit("EMU:TX 6F...9000")
@@ -132,14 +156,18 @@ class FakeSerial:
             self._emit("EMU:TX 7746820219809404080101009F3602...9000")  # GPO qVSDC (77)
             self._emit("EMU:RX READ-RECORD rec=1 sfi=1 00B2010C00")
             self._emit("EMU:TX 70..9000")
-            self._emit("EMU:RX GENERATE-AC pide=ARQC 80AE8000...")
+            self._emit(f"EMU:RX GENERATE-AC pide=ARQC da={da} 80AE8000...")
             self._emit("  CDOL1 Monto(9F02)=000000001000")
             self._emit("EMU:TX 771E...9000")
-            self._emulating = True
-        elif line.startswith("EMU:"):
+            FakeSerial._emulating = True
+        elif up.startswith("EMU:"):
             # Emulación NDEF observable: arranca y simula un lector Type 4 que lee
             # el tag de inmediato (SELECT app/CC/NDEF + READ), reportando cada APDU
-            # como el firmware nuevo. Queda "activa" hasta STOP/RELEASE.
+            # como el firmware nuevo. Queda "activa" hasta STOP/RELEASE. Si ya
+            # había emulación, primero el `EMU:DONE reason=restart` (como el firmware).
+            if FakeSerial._emulating:
+                FakeSerial._emulating = False
+                self._emit("EMU:DONE sent=0 reason=restart")
             body = line[4:]
             self._emit(f"EMU:START len={len(body)//2}")
             self._emit("EMU:RX SELECT-APP D2760000850101 00A4040007D276000085010100")
@@ -149,8 +177,8 @@ class FakeSerial:
             self._emit("EMU:RX READ off=0 len=15 00B0000F")
             self._emit("EMU:TX " + (body.upper() or "") + "9000")
             self._emit("EMU:MSG-SENT n=1")
-            self._emulating = True
-        elif line.startswith("SCAN"):
+            FakeSerial._emulating = True
+        elif up.startswith("SCAN"):
             self._emit("# Esperando tarjeta ISO-DEP...")
             self._emit("JSON_START")
             self._emit(json.dumps(_EMV_JSON))

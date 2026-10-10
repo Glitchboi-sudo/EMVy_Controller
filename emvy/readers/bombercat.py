@@ -114,6 +114,17 @@ def _open_serial(port: str, baud: int):
         ser.dtr = True
     except Exception:
         pass
+    # Exclusividad del puerto (TIOCEXCL): si otro proceso tiene abierto el
+    # mismo tty, este open falla en vez de compartirlo — sin esto, dos
+    # procesos leyendo el mismo puerto se ROBAN bytes entre sí y la salida de
+    # ambos queda corrupta (interleaving), un fallo silencioso y horrible de
+    # diagnosticar. Se captura: plataformas sin ioctl (Windows) lo ignoran.
+    try:
+        import fcntl
+        import termios
+        fcntl.ioctl(ser.fileno(), termios.TIOCEXCL, 0)
+    except Exception:
+        pass
     time.sleep(0.3)
     try:
         ser.reset_input_buffer()
@@ -157,6 +168,140 @@ def _readline(ser, deadline: float) -> str | None:
 def _writeline(ser, text: str) -> None:
     ser.write((text + "\r\n").encode())
     ser.flush()
+
+
+def _is_ping_ack(line: str) -> bool:
+    """True si la línea es el ack esperado a PING: `PONG` (dialecto histórico
+    del passthrough viejo) o `+OK bombercat` (Discovery Contract). El banner de
+    boot `+OK bombercat ready` NO lo es: es ruido que hay que saltar."""
+    return line == "PONG" or (line.startswith("+OK bombercat")
+                              and not line.startswith("+OK bombercat ready"))
+
+
+def _wait_ping_ack(ser, deadline: float) -> str | None:
+    """Lee líneas hasta encontrar el ack de PING (ver `_is_ping_ack`), saltando
+    el banner de boot `+OK bombercat ready` y cualquier otra línea de ruido
+    (`# debug`, AP WiFi…). Devuelve la línea ack o None si vence `deadline`.
+
+    Tolerar el banner es lo que permite hablar tanto con el firmware local
+    (EMVyBomberCat) como con el rework upstream de Electronic Cats, que lo emite
+    al arrancar antes de aceptar comandos."""
+    while time.monotonic() < deadline:
+        line = _readline(ser, deadline)
+        if line is None:
+            break
+        if _is_ping_ack(line):
+            return line
+        # cualquier otra línea (banner, debug) se ignora y seguimos esperando
+    return None
+
+
+# ---------------------------------------------------------------------------
+# parseo tolerante de las líneas del firmware (dialecto local Y rework upstream)
+# ---------------------------------------------------------------------------
+def parse_info(lines) -> dict:
+    """Parsea la respuesta del comando INFO (líneas `:<key> <value>` … `+OK`)
+    en un dict clave→valor. Tolerante al dialecto: acepta tanto `:role` (firmware
+    local EMVyBomberCat) como `:state` (rework upstream de Electronic Cats), con
+    cualquier valor. Líneas sin marcador `:` y el terminador `+OK`/`-ERR` se
+    ignoran. Devuelve también `ok` (True si terminó en `+OK`)."""
+    out: dict = {}
+    ok = False
+    for line in lines:
+        line = line.strip()
+        if line.startswith("+OK"):
+            ok = True
+            break
+        if line.startswith("-ERR"):
+            break
+        if line.startswith(":"):
+            key, _, value = line[1:].partition(" ")
+            out[key.strip()] = value.strip()
+    out["ok"] = ok
+    return out
+
+
+def parse_emu_card(line: str) -> dict | None:
+    """Parsea `EMU:CARD aid=<n> pan=<n> exp=<n> t2=<n> [cid=<x>]` (confirmación
+    del firmware de la inyección de datos de tarjeta en EMUEMV). El campo `cid=`
+    es OPCIONAL: el firmware local lo emite, el rework upstream NO. Devuelve un
+    dict con los campos presentes (longitudes en bytes) o None si no parsea."""
+    line = line.strip()
+    if not line.startswith("EMU:CARD"):
+        return None
+    out: dict = {}
+    for tok in line[len("EMU:CARD"):].split():
+        if "=" not in tok:
+            continue
+        k, v = tok.split("=", 1)
+        if k in ("aid", "pan", "exp", "t2"):
+            try:
+                out[k] = int(v)
+            except ValueError:
+                return None
+        elif k == "cid":
+            out["cid"] = v
+    return out if "aid" in out and "t2" in out else None
+
+
+def parse_generate_ac(line: str) -> dict | None:
+    """Parsea `EMU:RX GENERATE-AC pide=<t> [da=<TC|ARQC|AAC>] <hex>`.
+
+    El token `da=` es OPCIONAL: el firmware local lo inserta entre `pide=` y el
+    hex, el rework upstream NO. El hex del APDU es SIEMPRE el último token.
+    Devuelve `{pide, da|None, hex}` o None si no parsea."""
+    line = line.strip()
+    if not line.startswith("EMU:RX GENERATE-AC"):
+        return None
+    toks = line.split()
+    pide = da = None
+    hex_str = None
+    for tok in toks:
+        if tok.startswith("pide="):
+            pide = tok.split("=", 1)[1]
+        elif tok.startswith("da="):
+            da = tok.split("=", 1)[1]
+        else:
+            hex_str = tok          # el hex va siempre al final (con o sin da=)
+    if pide is None or hex_str is None:
+        return None
+    try:
+        bytes.fromhex(hex_str)
+    except ValueError:
+        return None
+    return {"pide": pide, "da": da, "hex": hex_str}
+
+
+def device_info(device, timeout: float = 5.0) -> dict:
+    """Pregunta INFO al firmware por serie y devuelve el dict parseado
+    (`parse_info`). Handshake tolerante: salta el banner de boot y acepta tanto
+    `PONG` como `+OK bombercat` al PING. Funciona con el firmware local
+    (EMVyBomberCat, dialecto `:role`) y con el rework upstream (banner +
+    `:state`). Lanza ReaderError si la placa no responde."""
+    ser = _open_serial(_resolve_port(device), BAUD_EMV)
+    try:
+        _writeline(ser, "PING")
+        if _wait_ping_ack(ser, time.monotonic() + timeout) is None:
+            raise ReaderError("El BomberCat no respondió a PING (¿firmware passthrough?).")
+        _writeline(ser, "INFO")
+        lines: list[str] = []
+        dl = time.monotonic() + timeout
+        while time.monotonic() < dl:
+            line = _readline(ser, dl)
+            if line is None:
+                continue
+            lines.append(line)
+            if line.startswith(("+OK", "-ERR")):
+                break
+        info = parse_info(lines)
+        if not info.get("ok"):
+            raise ReaderError(f"INFO del BomberCat sin confirmación: {lines[:4]}")
+        return info
+    finally:
+        try:
+            ser.close()
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -247,11 +392,26 @@ def open(device: DeviceInfo, mode: str = "passthrough", on_event=None,
     # el lector debe ser instantáneo (como un lector de contacto), sin exigir una
     # tarjeta puesta. La detección de tarjeta (WAIT) se hace **perezosa**, en el
     # primer APDU (p.ej. al capturar): así "Conectar" no falla con ERR:NOCARD.
+    # Handshake: solo confirma el firmware. **No** espera tarjeta aquí — conectar
+    # el lector debe ser instantáneo (como un lector de contacto), sin exigir una
+    # tarjeta puesta. La detección de tarjeta (WAIT) se hace **perezosa**, en el
+    # primer APDU (p.ej. al capturar): así "Conectar" no falla con ERR:NOCARD.
+    # El ack se espera con `_wait_ping_ack` (a través de `rl`, que reporta a
+    # `on_wire`): salta el banner de boot `+OK bombercat ready` del rework
+    # upstream y acepta tanto `+OK bombercat` como el `PONG` histórico.
     wl("PING")
-    if rl(time.monotonic() + 3) is None:
+    ack: str | None = None
+    dl_ping = time.monotonic() + 3
+    while time.monotonic() < dl_ping:
+        line = rl(dl_ping)
+        if line is None:
+            break
+        if _is_ping_ack(line):
+            ack = line
+            break
+    if ack is None:
         ser.close()
         raise ReaderError("El BomberCat no respondió a PING (¿firmware passthrough?).")
-
     trace: list = []
     state = {"activated": False, "ats": b""}
 
@@ -360,7 +520,12 @@ def _run_emulation(device, start_line: str, timeout: float | None,
     """Motor común de las emulaciones observables/cancelables. Manda `start_line`
     (`EMU:<hex>` para NDEF, `EMUEMV` para tarjeta EMV) y transmite las líneas de
     estado del firmware hasta `EMU:DONE`/`ERR`, `stop()` o `timeout` (manda
-    `STOP`). `timeout=None` = sin límite del host (el firmware auto-para)."""
+    `STOP`). `timeout=None` = sin límite del host (el firmware auto-para).
+
+    Si el MCU se resetea a mitad de sesión (el USB CDC se re-enumera y la lectura
+    serie falla), reabre el puerto y relanza la emulación con el mismo
+    `start_line` (hasta 5 reconexiones), reportando `# RECONNECT ...` — así un
+    apagón del enlace RF o un reset remoto no abortan el cobro en curso."""
     ser = _open_serial(_resolve_port(device), BAUD_EMV)
     lines: list[str] = []
 
@@ -371,12 +536,13 @@ def _run_emulation(device, start_line: str, timeout: float | None,
 
     try:
         _writeline(ser, "PING")
-        if _readline(ser, time.monotonic() + 3) is None:
+        if _wait_ping_ack(ser, time.monotonic() + 3) is None:
             raise ReaderError("El BomberCat no respondió a PING "
                               "(¿firmware EMVyBomberCat?).")
         _writeline(ser, start_line)
         deadline = None if timeout is None else time.monotonic() + timeout
         requested_stop = False
+        reconnects = 0
         while True:
             if stop is not None and stop():
                 requested_stop = True
@@ -386,10 +552,41 @@ def _run_emulation(device, start_line: str, timeout: float | None,
                 break
             # deadline corto por iteración: así reaccionamos a stop()/timeout
             # sin bloquear en la lectura mientras el lector no manda nada.
-            line = _readline(ser, time.monotonic() + 0.2)
+            try:
+                line = _readline(ser, time.monotonic() + 0.2)
+            except Exception as e:
+                # El MCU se resetó a mitad de sesión (USB CDC re-enumera, p.ej.
+                # apagón del enlace RF o un REBOOT remoto). En vez de morir con
+                # SerialException, reabrir el puerto y relanzar la emulación
+                # deja al POS seguir el cobro sin tocar la placa a mano.
+                reconnects += 1
+                if reconnects > 5:
+                    raise ReaderError(
+                        f"El BomberCat se desconectó a mitad de la emulación "
+                        f"({e}) y no volvió tras reintentar.") from e
+                _consume(f"# RECONNECT intento={reconnects} motivo={e}")
+                try:
+                    ser.close()
+                except Exception:
+                    pass
+                try:
+                    ser = _open_serial_retry(_resolve_port(device), BAUD_EMV,
+                                             tries=20, delay=0.5)
+                except ReaderError:
+                    continue      # agotada la apertura; el ciclo reintenta
+                _consume("# RECONNECT ok: relanzando emulación")
+                _writeline(ser, start_line)
+                continue
             if line is None:
                 continue
             _consume(line)
+            # Un EMU:DONE "reason=restart" es el de la sesión que NUESTRO propio
+            # comando acaba de reemplazar (el firmware para la vieja antes de
+            # arrancar la nueva): NO es el fin de la sesión actual — la nueva
+            # arranca justo detrás con su EMU:START. Sucede cuando la sesión
+            # anterior quedó huérfana (p.ej. el host murió sin mandar STOP).
+            if line.startswith("EMU:DONE") and "reason=restart" in line:
+                continue
             if line.startswith("EMU:DONE") or line.startswith("ERR"):
                 return lines
         if requested_stop:
@@ -452,7 +649,7 @@ def card_scan_to_ram(device, timeout: float = 25.0, on_line=None) -> dict:
     ser = _open_serial(_resolve_port(device), BAUD_EMV)
     try:
         _writeline(ser, "PING")
-        if _readline(ser, time.monotonic() + 3) is None:
+        if _wait_ping_ack(ser, time.monotonic() + 3) is None:
             raise ReaderError("El BomberCat no respondió a PING (¿firmware EMVyBomberCat?).")
         _writeline(ser, "CARDSCAN")
         dl = time.monotonic() + timeout
@@ -476,7 +673,158 @@ def card_scan_to_ram(device, timeout: float = 25.0, on_line=None) -> dict:
         ser.close()
 
 
-def emv_emulate(device, card=None, from_ram: bool = False,
+# ---------------------------------------------------------------------------
+# probe de tarjeta real (passthrough): PPSE → SELECT AID → GPO (PDOL dinámico)
+# → READ RECORD del AFL. Vuelca respuestas crudas para usarlas como referencia
+# al ajustar la emulación. NO persiste nada: la salida va a la consola (y puede
+# contener el PAN real — no la compartas tal cual).
+# ---------------------------------------------------------------------------
+def _parse_dol(dol: bytes) -> list[tuple[int, int]]:
+    """Un DOL (Data Object List, p.ej. el 9F38) es tag+longitud SIN valor."""
+    items = []
+    i = 0
+    while i < len(dol):
+        tag = dol[i]; i += 1
+        if tag & 0x1F == 0x1F:
+            tag = (tag << 8) | dol[i]; i += 1
+        items.append((tag, dol[i])); i += 1
+    return items
+
+
+def _tlv_find(data: bytes, want: int, depth: int = 0) -> bytes | None:
+    """Busca `want` en `data` (iterando constructed tags de EMV)."""
+    if depth > 6:
+        return None
+    i = 0
+    while i + 2 <= len(data):
+        tag = data[i]; i += 1
+        if tag & 0x1F == 0x1F:
+            if i >= len(data):
+                return None
+            tag = (tag << 8) | data[i]; i += 1
+        if i >= len(data):
+            return None
+        ln = data[i]; i += 1
+        if ln & 0x80:
+            n = ln & 0x7F
+            if i + n > len(data):
+                return None
+            ln = int.from_bytes(data[i:i + n], "big"); i += n
+        val = data[i:i + ln]
+        if tag == want:
+            return val
+        if tag in (0x6F, 0xA5, 0xBF0C, 0x61, 0x77, 0x70):
+            hit = _tlv_find(val, want, depth + 1)
+            if hit is not None:
+                return hit
+        i += ln
+    return None
+
+
+def probe_card(device, amount_cents: int = 0, country: str = "0484",
+               currency: str | None = None, wait_s: int = 60,
+               on_line=None) -> dict:
+    """Lee una tarjeta EMV real por NFC siguiendo el flujo de un terminal de
+    pago y devuelve las respuestas CRUDAS (PPSE/FCI/GPO/registros) en un dict
+    `{"ppse": hex, "fci": hex, "gpo": hex, "records": [(cmd, hex)], ...}`.
+    El GPO se construye con el PDOL **real** anunciado por la tarjeta (9F38) —
+    un Lc mal calculado aquí hace que tarjetas reales respondan 6985. Solo
+    lectura; nada se guarda. Requiere firmware **EMVyBomberCat**."""
+    import random
+    currency = currency or country
+    ppse = bytes.fromhex("00A404000E325041592E5359532E444446303100")
+
+    def emit(line):
+        if on_line:
+            on_line(line)
+
+    ser = _open_serial(_resolve_port(device), BAUD_EMV)
+    try:
+        _writeline(ser, "PING")
+        if _wait_ping_ack(ser, time.monotonic() + 3) is None:
+            raise ReaderError("El BomberCat no respondió a PING (¿firmware EMVyBomberCat?).")
+        _writeline(ser, f"WAIT {wait_s * 1000}")
+        dl = time.monotonic() + wait_s + 2
+        while True:
+            line = _readline(ser, dl)
+            if line is None:
+                raise ReaderError("probe_card: timeout esperando la tarjeta.")
+            emit(line)
+            if line.startswith("READY:"):
+                break
+            if line.startswith("ERR"):
+                raise ReaderError(f"probe_card: {line} (¿tarjeta contactless acercada?)")
+
+        def apdu(cmd: bytes, what: str, deadline_s: float = 6.0) -> bytes:
+            _writeline(ser, "APDU:" + to_hex(cmd, sep=""))
+            dl = time.monotonic() + deadline_s
+            while time.monotonic() < dl:
+                line = _readline(ser, dl)
+                if line is None:
+                    continue
+                if line.startswith("RESP:"):
+                    emit(f"{what} <- {line[5:]}")
+                    return from_hex(line[5:])
+                if line.startswith("ERR"):
+                    raise ReaderError(f"{what}: {line}")
+            raise ReaderError(f"{what}: timeout esperando RESP.")
+
+        out: dict = {}
+        r = apdu(ppse, "PPSE")
+        out["ppse"] = r.hex().upper()
+        aid = _tlv_find(r[:-2], 0x4F) or bytes.fromhex("A0000000031010")
+        out["aid"] = aid.hex().upper()
+        sel_aid = bytes([0x00, 0xA4, 0x04, 0x00, len(aid)]) + aid + b"\x00"
+        r = apdu(sel_aid, "SELECT-AID")
+        out["fci"] = r.hex().upper()
+        if r[-2:] != b"\x90\x00":
+            raise ReaderError(f"SELECT AID {out['aid']}: SW {r[-2:].hex().upper()} "
+                              "(¿AID no disponible?)")
+        pdol = _tlv_find(r[:-2], 0x9F38) or b""
+        out["pdol"] = pdol.hex().upper()
+        today = time.strftime("%y%m%d")
+        values = {
+            0x9F66: "32804000", 0x9F02: f"{amount_cents:012d}",
+            0x9F03: "0" * 12, 0x9F1A: country, 0x95: "0" * 10,
+            0x5F2A: currency, 0x9A: today, 0x9C: "00",
+            0x9F37: f"{random.getrandbits(32):08X}", 0x9F35: "22",
+        }
+        body = bytearray()
+        for tag, ln in _parse_dol(pdol):
+            v = values.get(tag, "")
+            v = (v[: ln * 2]).ljust(ln * 2, "0")
+            body.extend(bytes.fromhex(v))
+        # Lc = bytes del campo de datos (83 <len> <pdol…>) — NO incluye el Le.
+        gpo = bytes([0x80, 0xA8, 0x00, 0x00, 2 + len(body), 0x83, len(body)]) \
+            + bytes(body) + b"\x00"
+        r = apdu(gpo, "GPO")
+        out["gpo"] = r.hex().upper()
+        if r[-2:] != b"\x90\x00":
+            out["sw"] = r[-2:].hex().upper()
+            return out                       # p.ej. 6985: la tarjeta no coopera
+        gpo_body = r[:-2]
+        afl = _tlv_find(gpo_body, 0x94)
+        aip = _tlv_find(gpo_body, 0x82)
+        out["aip"] = aip.hex().upper() if aip else None
+        out["afl"] = afl.hex().upper() if afl else None
+        out["records"] = []
+        if afl:
+            for e in range(0, len(afl), 4):
+                sfi, r1, r2 = afl[e], afl[e + 1], afl[e + 2]
+                for rec in range(r1, r2 + 1):
+                    cmd = bytes([0x00, 0xB2, rec, (sfi << 3) | 4, 0x00])
+                    rr = apdu(cmd, f"RECORD sfi={sfi} rec={rec}")
+                    out["records"].append((to_hex(cmd, sep=""), rr.hex().upper()))
+        return out
+    finally:
+        try:
+            _writeline(ser, "RELEASE")
+        except Exception:
+            pass
+        ser.close()
+
+
+def emv_emulate(device, card=None, from_ram: bool = False, cid: str = "40",
                 timeout: float | None = None, on_line=None, stop=None) -> list[str]:
     """Emula una **tarjeta EMV** para perfilar/fuzzear un TERMINAL de pago.
 
@@ -485,23 +833,35 @@ def emv_emulate(device, card=None, from_ram: bool = False,
     AVANCE y revele su configuración: reporta `EMU:RX SELECT-PPSE`,
     `EMU:RX SELECT-AID <hex> (ESQUEMA)`, `EMU:RX GPO` con el PDOL **decodificado**
     (`  PDOL TTQ(9F66)=..`, monto, país, divisa, UN…), `READ-RECORD` y
-    `GENERATE-AC` con el CDOL1 decodificado. **No** genera un criptograma válido
-    (sin la clave del emisor): el objetivo es extraer el perfil del terminal, no
-    aprobar un pago.
+    `GENERATE-AC` con el CDOL1 decodificado.
+
+    `cid` fija la **decisión de criptograma** (tag 9F27) que devuelve la tarjeta
+    emulada — el AC es dummy (sin la clave del emisor), pero sin ODA anunciada
+    el terminal acepta la decisión igual que en un cobro contactless real:
+      * ``"40"`` (default) **TC**: el terminal aprueba OFFLINE y el cobro
+        **completa** (como los pagos de bajo monto). Úsalo para validar el
+        flujo completo del POS.
+      * ``"80"`` **ARQC**: el terminal intenta ir ONLINE y el cobro se queda
+        esperando una autorización que el criptograma fake jamás obtendrá.
+      * ``"00"`` **AAC**: transacción declinada.
 
     Fuente de la tarjeta emulada:
       * `from_ram=True`  → la tarjeta guardada en la RAM del firmware por
-        `card_scan_to_ram()` (comando `EMUEMV:RAM`), flujo on-device.
+        `card_scan_to_ram()` (comando `EMUEMV:RAM|<cid>`), flujo on-device.
       * `card=<EmvCard>` → sus datos reales, inyectados desde el host
-        (`EMUEMV:<aid>|<pan>|<exp>|<track2>`).
-      * ninguno         → una Visa de prueba canned (`EMUEMV`).
-    Cancelable con `stop()`/`timeout`. Requiere el firmware **EMVyBomberCat**."""
+        (`EMUEMV:<aid>|<pan>|<exp>|<track2>|<cid>`).
+      * ninguno         → una Visa de prueba canned (`EMUEMV:||||<cid>`).
+    Cancelable con `stop()`/`timeout`. Requiere el firmware **EMVyBomberCat**
+    (con campo `<cid>`; firmware antiguo ignora el 5º campo y siempre va online)."""
+    cid = (cid or "40").upper().removeprefix("0X")
+    if cid not in ("00", "40", "80"):
+        raise ValueError(f"cid inválido {cid!r}: usa '40' (TC), '80' (ARQC) o '00' (AAC)")
     if from_ram:
-        start = "EMUEMV:RAM"
+        start = f"EMUEMV:RAM|{cid}"
     elif card is not None and _emv_card_params(card).strip("|"):
-        start = "EMUEMV:" + _emv_card_params(card)
+        start = "EMUEMV:" + _emv_card_params(card) + f"|{cid}"
     else:
-        start = "EMUEMV"
+        start = f"EMUEMV:||||{cid}"
     return _run_emulation(device, start, timeout, on_line, stop)
 
 

