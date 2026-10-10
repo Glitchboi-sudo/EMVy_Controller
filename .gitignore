@@ -62,3 +62,6 @@ Thumbs.db
 # ─── Configuración local ───────────────────────────────────────────────────
 .env
 .env.local
+
+# Temporales locales (nunca subir)
+tmp/

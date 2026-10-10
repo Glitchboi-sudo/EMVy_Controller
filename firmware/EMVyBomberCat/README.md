@@ -16,7 +16,7 @@ todo manejable por **serie** desde EMVyController.
 | `MAG:<track1>\|<track2>`   | MAG    | Emula un swipe de banda magnética (magspoof) → `OK`  |
 | `EMU:<hex>`                | NDEF   | Emula un tag NFC Type 4 (NDEF); observable y cancelable |
 | `CARDSCAN`                 | EMV    | Lee una tarjeta EMV por NFC y la guarda en **RAM** del firmware |
-| `EMUEMV[:aid\|pan\|exp\|t2\|RAM]` | EMV | Emula tarjeta EMV: sin args=Visa prueba; `:hex…`=captura del host; `:RAM`=la escaneada con CARDSCAN |
+| `EMUEMV[:aid\|pan\|exp\|t2\|cid\|RAM[ \|cid]]` | EMV | Emula tarjeta EMV: sin args=Visa prueba; `:hex…`=captura del host; `:RAM`=la escaneada con CARDSCAN; `cid` (5º campo) = decisión de criptograma 40=TC offline (default host) / 80=ARQC online / 00=AAC |
 | `STOP`                     | EMU    | Detiene la emulación en curso (NDEF o EMV) → `EMU:DONE` |
 | `REBOOT` / `RESET`         | —      | Reinicia el MCU (`NVIC_SystemReset`); el USB se re-enumera |
 
@@ -28,15 +28,31 @@ No bloquea: arranca (`EMU:START`) y sigue hasta `STOP`/`RELEASE`, otro `EMU:`, `
 de seguridad (180 s) → `EMU:DONE sent=<k> reason=<...>`.
 
 **Emulación de tarjeta EMV** (`EMUEMV`): en vez de un tag NDEF, responde al flujo EMV contactless de un
-**terminal de pago** (`SELECT PPSE → FCI`, `SELECT AID → FCI con PDOL`, `GPO → AIP+AFL`, `READ RECORD`,
-`GENERATE AC`) con datos canned, para que el terminal **avance y revele su configuración**. Reporta
+**terminal de pago** (`SELECT PPSE → FCI`, `SELECT AID → FCI con PDOL`, `GPO → 77 fast-path con el
+criptograma dentro`, `GENERATE AC`) con datos canned, para que el terminal **avance y revele su
+configuración**. El GPO es **fast path qVSDC puro**, réplica estructural de una tarjeta Visa real que
+un POS de prueba acepta (validado con `probe-card` sobre tarjeta bancaria): `77{ 82 AIP=2000, 57
+track2, 5F20 "PAYWAVE/VISA", 5F34, 9F10 IAD, 9F26 AC, 9F27 CID, 9F36 ATC, 9F5D, 9F6C CTQ, 9F6E FFI }`
+— **sin AFL** (el terminal no hace READ RECORD y la transacción puede completar en el GPO). Los FCIs
+del PPSE y del SELECT AID replica a la tarjeta real (label `50`/`9F12` "VISA DEBITO", `5F2D`, `9F11`,
+`BF0C{9F5A, IIN 42}` — el IIN va DENTRO del BF0C; un TLV mal formado aquí hacía que el POS abortara
+con "tarjeta ilegible"). Reporta
 `EMU:RX SELECT-PPSE`, `EMU:RX SELECT-AID <hex> (ESQUEMA)`, y sobre todo el **PDOL del GPO decodificado**
 (`  PDOL TTQ(9F66)=… Monto(9F02)=… Pais(9F1A)=… Divisa(5F2A)=… UN(9F37)=…`) y el CDOL1 del GENERATE AC.
-**No** genera un criptograma válido (sin la clave del emisor): el objetivo es **extraer el perfil del
-terminal** (qué pide y con qué parámetros), no aprobar un pago. Con `EMUEMV:<aid>|<pan>|<exp>|<track2>`
-(hex; vacío = default) presenta los datos de una **captura real** en vez de la Visa de prueba; el firmware
-confirma `EMU:CARD aid=.. pan=.. exp=.. t2=..`. `emvy bombercat emv-emulate [--card cap.json]` o la Fuente
-"EMV · tarjeta de pago" (con selector de captura) en la pestaña Fuzzing.
+**No** genera un criptograma válido (sin la clave del emisor). El **5º campo opcional `<cid>`**
+(`EMUEMV:<aid>|<pan>|<exp>|<track2>|<cid>`, también `EMUEMV:RAM|<cid>`) fija la **decisión de
+criptograma** (tag 9F27) y, con ella, si el cobro se completa:
+`40` = **TC** → el terminal aprueba **offline** y la transacción **completa** (como los cobros
+contactless de bajo monto; sin ODA anunciada —AIP 1800— el terminal no puede verificar el AC
+dummy y acepta la decisión de la tarjeta). `80` = **ARQC** → el terminal intenta ir **online** y
+el cobro se cuelga esperando una autorización que el criptograma fake jamás obtendrá (comportamiento
+histórico). `00` = **AAC** → declinada. El firmware confirma `EMU:CARD aid=.. pan=.. exp=.. t2=.. cid=..`
+y en el GENERATE AC reporta la decisión efectiva (`EMU:RX GENERATE-AC pide=ARQC da=TC …`). El host
+(EMVy ≥ la versión con `cid`) siempre lo manda; firmware viejo lo ignora y siempre va online.
+Con `EMUEMV:<aid>|<pan>|<exp>|<track2>`
+(hex; vacío = default) presenta los datos de una **captura real** en vez de la Visa de prueba;
+el firmware confirma los campos. `emvy bombercat emv-emulate [--card cap.json] [--cid 40|80|00]`
+o la Fuente "EMV · tarjeta de pago" (con selector de captura y **Decisión**) en la pestaña Fuzzing.
 
 **Escanear → RAM → reemular (on-device)**: `CARDSCAN` lee una tarjeta por NFC y la guarda en la RAM del
 firmware (`EMU:SCANNED aid=.. pan=..`); luego `EMUEMV:RAM` la presenta al terminal — todo en la placa, sin
@@ -69,13 +85,35 @@ lo descubra e identifique de forma **idéntica**:
 | Estímulo (host→device) | Respuesta (device→host)                    | Cláusula |
 |------------------------|--------------------------------------------|----------|
 | `ping` (o `PING`/`Ping`) | `+OK bombercat`  (sin data lines)        | §5, C-6/C-7 |
-| `info`                 | `:fw_name emvybombercat` · `:fw <v>` · `:role emv-multitool` · `+OK` | §6.1, C-8 |
+| `info`                 | `:fw_name emvybombercat` · `:fw <v>` · `:role emv-multitool` · `:state idle\|emulating` · `+OK` | §6.1, C-8 |
 | `identify`             | `+OK` inmediato + parpadeo de LED asíncrono (~2 s) | §6.2, C-9 |
 | `<verbo desconocido>`  | `-ERR unknown command <verb>`              | §6.3.3, C-11 |
 
 - El verbo es **case-insensitive** (el dispatcher compara en mayúsculas), así que
   `ping`/`PING`/`Ping` producen la misma respuesta (§5.1) — esto reconcilia el `PING`
-  (mayúsculas) del reader de EMVy con el `ping` (minúsculas) del CLI del vendor.
+  (mayúsculas) del reader de EMVy con el `ping` (minúsculas) del CLI del vendor. Lo
+  mismo vale para **todos** los verbos operativos (`WAIT`/`APDU:`/`SCAN`/`EMU:`…),
+  no solo el plano de control.
+- Al arrancar emite el banner `+OK bombercat ready`, **antes** de aceptar comandos —
+  igual que el rework upstream (bombercat-firmware v1.1.x). Los hosts conformes lo
+  saltan: EMVy Controller (`_wait_ping_ack` en `emvy/readers/bombercat.py` lo descarta
+  al esperar el ack de `PING`) y el `DeviceLink` de bombercat-tools (resetea el buffer
+  antes de cada comando; y aun colado, `+OK bombercat ready` satisface
+  `ok AND "bombercat" in message`).
+- `:state` reporta el estado real de emulación: `emulating` mientras una sesión
+  `EMU:`/`EMUEMV` está activa (`gEmuActive`), `idle` en cualquier otro caso (el
+  barrido `SCAN`/`CARDSCAN` es bloqueante, así que no hay estado intermedio "scanning"
+  observable por INFO). Se mantiene `:role emv-multitool` por retrocompatibilidad con
+  hosts EMVy antiguos; los hosts conformes al contrato leen `:state`.
+
+**Dialecto EMU: extensión local vs rework upstream.** Dos líneas de la emulación EMV
+tienen campos EXTRA respecto al rework upstream (el host EMVy las parsea en ambas
+variantes, ver `parse_emu_card`/`parse_generate_ac` en `emvy/readers/bombercat.py`):
+  * `EMU:CARD aid=.. pan=.. exp=.. t2=.. cid=..` — el 5º campo `cid=` NO existe
+    upstream (el rework no fija decisión de criptograma desde el host).
+  * `EMU:RX GENERATE-AC pide=ARQC da=TC <hex>` — el token `da=` (decisión efectiva de
+    la tarjeta emulada) NO existe upstream: `pide=<t> <hex>` va directo al hex, que es
+    siempre el último token en ambos dialectos.
 - El parpadeo de `identify` **no bloquea** el plano de control: la respuesta `+OK` sale
   al instante y el LED se bombea desde `loop()` (`identifyPump`, §6.2.1).
 
