@@ -34,9 +34,11 @@ class ToolsPanel(QTabWidget):
         self.flags = _FlagsTool(win)
         self.iso = _IsoTool(win)
         self.write = _CardWriteTool(win)     # Escritura directa (APDU) + GlobalPlatform
+        self.sessions = _SessionsTool(win)
         self.addTab(self.flags, "Flags")
         self.addTab(self.iso, "ISO 8583")
         self.addTab(self.write, "Escritura")
+        self.addTab(self.sessions, "Sesiones")
 
     # reexpuestos para MainWindow (resultados de workers)
     def log_write(self, op, resp) -> None:
@@ -542,3 +544,121 @@ class _CardWriteTool(QWidget):
     def append_gp_lines(self, lines) -> None:
         for line in lines:
             self._log.appendPlainText(line)
+
+
+class _SessionsTool(QWidget):
+    """Sesiones APDU grabadas del proyecto activo: lista, visor y replay.
+
+    'Ver' abre un diálogo con el detalle formateado por el APDU printer;
+    'Reproducir' reenvía los comandos a la tarjeta del lector conectado en el
+    pool de workers (nunca se tocan widgets desde el hilo de trabajo)."""
+
+    def __init__(self, win) -> None:
+        super().__init__()
+        self.win = win
+        self._sessions: list = []
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(8)
+
+        bar = QHBoxLayout()
+        refresh = QPushButton("Refrescar"); refresh.clicked.connect(self.refresh_sessions)
+        view = QPushButton("Ver…"); view.clicked.connect(self._view)
+        replay = QPushButton("Reproducir"); replay.clicked.connect(self._replay)
+        bar.addWidget(refresh); bar.addWidget(view); bar.addWidget(replay)
+        bar.addStretch(1)
+        hint = QLabel("Grabaciones `emvy -R` del proyecto activo. El replay reenvía "
+                      "los comandos a la tarjeta conectada; los criptogramas "
+                      "(9F26/9F36) legítimamente difieren entre ejecuciones.")
+        hint.setWordWrap(True); hint.setProperty("hint", "true")
+        lay.addLayout(bar); lay.addWidget(hint)
+
+        self._table = QTableWidget(0, 4)
+        self._table.setHorizontalHeaderLabels(["sid", "inicio", "intercambios", "criptogramas"])
+        self._table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self._table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._table.verticalHeader().setVisible(False)
+        lay.addWidget(self._table, 1)
+
+    def refresh_sessions(self) -> None:
+        from ...project import store
+        from ...session.recorder import list_sessions, load_session
+        from ...core import sessionlog
+        self._table.setRowCount(0)
+        self._sessions = []
+        proj = store.active_project()
+        if not proj:
+            self.win.notify.emit("Sin proyecto activo: activa uno en Proyectos.")
+            return
+        rows = []
+        for path in list_sessions(proj):
+            try:
+                s = load_session(path)
+            except Exception:  # noqa: BLE001
+                continue
+            rows.append((s, len(sessionlog.extract_cryptograms(s))))
+        self._table.setRowCount(len(rows))
+        for i, (s, n_crypto) in enumerate(rows):
+            for j, val in enumerate((s.sid, s.started or "?",
+                                     str(len(s.exchanges)),
+                                     str(n_crypto) if n_crypto else "")):
+                self._table.setItem(i, j, QTableWidgetItem(val))
+            self._sessions.append(s)
+
+    def _selected(self):
+        row = self._table.currentRow()
+        if 0 <= row < len(self._sessions):
+            return self._sessions[row]
+        self.win.notify.emit("Selecciona una sesión de la tabla.")
+        return None
+
+    def _view(self) -> None:
+        s = self._selected()
+        if s is not None:
+            self._show_detail(s, title=f"Sesión {s.sid}")
+
+    def _show_detail(self, session, title: str = "") -> None:
+        from PySide6.QtWidgets import QDialog, QVBoxLayout
+        from ...core import apduprint
+        dlg = QDialog(self)
+        dlg.setWindowTitle(title or f"Sesión {session.sid}")
+        v = QVBoxLayout(dlg)
+        text = _log()
+        meta = (f"inicio={session.started or '?'}"
+                + (f"  cierre={session.closed}" if session.closed else "  (sin cerrar)")
+                + (f"  lector={session.reader}" if session.reader else "")
+                + (f"  ATR={session.atr}" if session.atr else ""))
+        text.appendPlainText(meta)
+        for i, ex in enumerate(session.exchanges):
+            text.appendPlainText(f"\n── #{i + 1}  [{ex.response.sw_hex}] ──")
+            text.appendPlainText(apduprint.format_exchange(ex))
+        v.addWidget(text)
+        dlg.resize(720, 540)
+        dlg.exec()
+
+    def _replay(self) -> None:
+        s = self._selected()
+        if s is None:
+            return
+        if not (self.win.reader and self.win.reader.transceive):
+            self.win.notify.emit("Conecta un lector primero (pestaña Lectores).")
+            return
+        from ...session.recorder import replay_session
+        send = self.win.active_send()
+
+        def _do():
+            return replay_session(s, send)
+
+        def _ok(new_exchanges):
+            from ...core.sessionlog import LogSession
+            replayed = LogSession(sid=s.sid, started=s.started, closed=s.closed,
+                                  reader=s.reader, atr=s.atr,
+                                  exchanges=tuple(new_exchanges))
+            self._show_detail(replayed, title=f"Replay de {s.sid}")
+            self.win.notify.emit(f"Replay completado: {len(new_exchanges)} intercambios.")
+
+        from ..worker import submit
+        submit(self.win.pool, _do, on_result=_ok,
+               on_error=lambda m: self.win.notify.emit(f"Replay: {m}"))

@@ -169,6 +169,7 @@ class EmvyApp(App):
         Binding("m", "show('tab-bc')", "BomberCat", show=False),
         Binding("8", "tool('tool-iso')", "ISO 8583", show=False),
         Binding("w", "tool('tool-write')", "Escritura", show=False),
+        Binding("s", "tool('tool-sessions')", "Sesiones", show=False),
         Binding("u", "show('tab-fuzz')", "Fuzzing", show=False),
         Binding("comma", "show('tab-set')", "Ajustes", show=False),
     ]
@@ -253,7 +254,7 @@ class EmvyApp(App):
 
     def action_tool(self, tool_id: str) -> None:
         """Navega a la pestaña Consola y activa una de sus herramientas
-        (tool-flags / tool-iso / tool-write)."""
+        (tool-flags / tool-iso / tool-write / tool-sessions)."""
         self.action_show("tab-con")
         try:
             self.query_one("#screen-tools", ToolsScreen).show_tool(tool_id)

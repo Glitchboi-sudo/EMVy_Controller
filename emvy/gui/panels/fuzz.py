@@ -12,10 +12,11 @@ from __future__ import annotations
 
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
-    QPushButton, QTabWidget, QVBoxLayout, QWidget,
+    QPlainTextEdit, QPushButton, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from ...core import cardfuzz
+from ...core import playbooks
 from ...core import track as tracklib
 from ...core.hexutil import to_hex
 from ...project import store
@@ -35,10 +36,12 @@ class FuzzPanel(QWidget):
         # Sub-pestañas: una herramienta enfocada a la vez (menos ruido que apilar
         # los cuatro paneles). Los widgets/IDs no cambian.
         sub = QTabWidget()
+        self._sub = sub  # expuesto para pruebas (orden/contenido de sub-pestañas)
         sub.addTab(self._card_editor(), "Editor de tarjeta")
         sub.addTab(self._ndef_lane(), "Emulación NFC/EMV")
         sub.addTab(self._emv_lane(), "Registro EMV")
         sub.addTab(self._track_lane(), "Banda magnética")
+        sub.addTab(self._mut_lane(), "Mutaciones")
         lay.addWidget(sub, 1)
         self._gen_track(); self._gen_emv(); self._gen_ndef()
 
@@ -138,6 +141,13 @@ class FuzzPanel(QWidget):
         emit = QPushButton("Emular"); emit.clicked.connect(self._emit)
         emit.setProperty("accent", True)          # CTA principal del carril
         emit.setIcon(icon("play", color=ACCENT_FG))
+        # Decisión de criptograma de la tarjeta EMV emulada (tag 9F27): TC
+        # aprueba offline y el cobro COMPLETA; ARQC manda al terminal online
+        # (se cuelga esperando autorización); AAC declina.
+        self._emv_cid = QComboBox()
+        self._emv_cid.addItem("Aprobar offline (TC)", "40")
+        self._emv_cid.addItem("Pedir online (ARQC)", "80")
+        self._emv_cid.addItem("Declinar (AAC)", "00")
         stop = QPushButton("Detener"); stop.clicked.connect(self._stop_ndef)
         stop.setIcon(icon("square"))
         reboot = QPushButton("Reboot"); reboot.clicked.connect(self._reboot)
@@ -152,7 +162,9 @@ class FuzzPanel(QWidget):
         self._emv_scan = QWidget()
         sr = QHBoxLayout(self._emv_scan); sr.setContentsMargins(0, 0, 0, 0)
         sr.addWidget(QLabel("Escanear tarjeta:")); sr.addWidget(scan_mem)
-        sr.addWidget(scan_ram); sr.addStretch(1)
+        sr.addWidget(scan_ram)
+        sr.addWidget(QLabel("Decisión:")); sr.addWidget(self._emv_cid)
+        sr.addStretch(1)
         self._emv_scan.hide()
 
         top = QHBoxLayout()
@@ -256,22 +268,23 @@ class FuzzPanel(QWidget):
     def _emit(self) -> None:
         """Un solo botón: emula según el MODO de la Fuente (EMV o NFC/NDEF)."""
         if self._ndef_src.currentData() == "emv":
+            cid = self._emv_cid.currentData()
             sel = self._ndef_cap.currentData()
             if sel == "__ram__":                       # RAM del firmware (BomberCat)
-                self.win.emit_emv(from_ram=True)
+                self.win.emit_emv(from_ram=True, cid=cid)
                 return
             if sel == "__mem__":                       # RAM de la app
                 if getattr(self.win, "_scanned_card", None) is None:
                     self.win.notify.emit("No hay tarjeta en memoria. Usa Escanear→memoria.")
                     return
-                self.win.emit_emv(card=self.win._scanned_card)
+                self.win.emit_emv(card=self.win._scanned_card, cid=cid)
                 return
             try:
                 card = self._load_capture_card()      # None = tarjeta de prueba fija
             except Exception as e:  # noqa: BLE001
                 self.win.notify.emit(f"Captura EMV: {e}")
                 return
-            self.win.emit_emv(card)
+            self.win.emit_emv(card, cid=cid)
             return
         from ...core.hexutil import from_hex
         hexval = self._ndef_hex.text().strip()
@@ -423,6 +436,46 @@ class FuzzPanel(QWidget):
                        aid=self._ed_aid.text().strip(), label=self._ed_name.text().strip(),
                        track2=self._ed_t2.text().strip())
         self.win.emit_emv(card=card)
+
+    # -- Mutaciones (motor EMV + playbooks COMBO) ----------------------------
+    def _mut_lane(self) -> QGroupBox:
+        box = QGroupBox("Mutaciones · motor EMV + playbooks COMBO (vista previa offline)")
+        self._mut_pb = QComboBox()
+        for p in playbooks.playbooks():
+            self._mut_pb.addItem(f"{p['id']} · {p['title']}", p["id"])
+        self._mut_pb.currentIndexChanged.connect(self._mut_desc)
+        prev = QPushButton("Vista previa"); prev.clicked.connect(self._mut_preview)
+        self._mut_out = QPlainTextEdit()
+        self._mut_out.setReadOnly(True)
+        self._mut_desc_lbl = _desc()
+        top = QHBoxLayout(); top.addWidget(self._mut_pb, 1); top.addWidget(prev)
+        v = QVBoxLayout(box); v.addLayout(top); v.addWidget(self._mut_desc_lbl)
+        v.addWidget(self._mut_out, 1)
+        self._mut_desc()
+        return box
+
+    def _mut_desc(self) -> None:
+        p = playbooks.get_playbook(self._mut_pb.currentData())
+        if p:
+            self._mut_desc_lbl.setText(p["description"])
+
+    def _mut_preview(self) -> None:
+        """Diff del playbook sobre el dump activo (`win.last_dump`). Sin dump no
+        inventa tarjeta: pide capturar primero y lista solo las inyecciones."""
+        from ...core import mutations
+        p = playbooks.get_playbook(self._mut_pb.currentData())
+        if not p:
+            return
+        config = mutations.MutationConfig.from_dict(p["config"])
+        dump = getattr(self.win, "last_dump", None)
+        lines = [f"{p['id']} · {p['title']}"]
+        if dump is None:
+            lines.append("Sin captura en memoria: captura una tarjeta primero. "
+                         "Inyecciones planificadas del playbook:")
+        else:
+            lines.extend(mutations.preview_dump(dump, config))
+        lines.extend(mutations.planned_injections(config))
+        self._mut_out.setPlainText("\n".join(lines))
 
 
 def _desc() -> QLabel:

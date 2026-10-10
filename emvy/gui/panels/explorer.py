@@ -8,9 +8,10 @@ from datetime import datetime
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QComboBox, QGroupBox, QHBoxLayout, QLabel,
-    QLineEdit, QPushButton, QSplitter, QTreeWidget, QTreeWidgetItem,
-    QVBoxLayout, QWidget,
+    QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
+    QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMenu, QPushButton, QSplitter,
+    QTableWidget, QTableWidgetItem, QTreeWidget, QTreeWidgetItem,
+    QTreeWidgetItemIterator, QVBoxLayout, QWidget,
 )
 
 from ...core import tlv
@@ -78,6 +79,7 @@ class ExplorerPanel(QWidget):
         super().__init__()
         self.win = win
         self._sel: dict | None = None
+        self._profile = None          # CardProfile de la última captura mostrada
 
         from ..components import Card, SectionCard, SectionLabel, button, primary_button
         self._SectionCard, self._button, self._primary = SectionCard, button, primary_button
@@ -100,6 +102,8 @@ class ExplorerPanel(QWidget):
         self._tree.setAlternatingRowColors(True)
         self._tree.setRootIsDecorated(True)
         self._tree.currentItemChanged.connect(self._on_item)
+        self._tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._tree.customContextMenuRequested.connect(self._context_menu)
         tree_card.body.addWidget(self._tree, 1)
 
         splitter = QSplitter(Qt.Horizontal)
@@ -118,6 +122,13 @@ class ExplorerPanel(QWidget):
         SectionCard, button, primary_button = self._SectionCard, self._button, self._primary
         w = QWidget()
         v = QVBoxLayout(w); v.setContentsMargins(0, 0, 0, 0); v.setSpacing(10)
+
+        ident = SectionCard("Identidad de tarjeta", margins="md", spacing="sm")
+        self._identity = QLabel("Sin captura.")
+        self._identity.setWordWrap(True); self._identity.setProperty("role", "mono")
+        self._identity.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        ident.body.addWidget(self._identity)
+        v.addWidget(ident)
 
         nodo = SectionCard("Nodo seleccionado", margins="md", spacing="sm")
         self._detail = QLabel("Selecciona un nodo del árbol.")
@@ -155,6 +166,18 @@ class ExplorerPanel(QWidget):
         srow = QHBoxLayout(); srow.addStretch(1); srow.addWidget(save)
         guardar.body.addLayout(srow)
         v.addWidget(guardar)
+
+        intel = SectionCard("Intel", margins="md", spacing="sm")
+        self._intel_table = QTableWidget(0, 4)
+        self._intel_table.setHorizontalHeaderLabels(["hash", "esquema", "veces", "última"])
+        self._intel_table.horizontalHeader().setStretchLastSection(True)
+        self._intel_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._intel_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        intel.body.addWidget(self._intel_table)
+        irec = button("Recomendaciones"); irec.clicked.connect(self._intel_recs)
+        irow = QHBoxLayout(); irow.addStretch(1); irow.addWidget(irec)
+        intel.body.addLayout(irow)
+        v.addWidget(intel)
         v.addStretch(1)
         return w
 
@@ -167,6 +190,103 @@ class ExplorerPanel(QWidget):
         for p in store.list_path_projects():
             self._dest.addItem(f"→ ruta: {p.name}", f"path:{p.path}")
         self._dest.addItem("→ archivo (el campo es la ruta)", "file")
+        self._reload_intel_table()
+
+    # -- intel: identidad + tabla del proyecto --------------------------------
+    def _reload_intel_table(self) -> None:
+        """Tarjetas conocidas del proyecto en la tabla INTEL (defensivo)."""
+        self._intel_table.setRowCount(0)
+        proj = store.active_project()
+        if not proj:
+            return
+        try:
+            from ...project.inteldb import IntelDB
+            with IntelDB(proj) as db:
+                rows = db.list_cards()
+        except Exception:
+            return
+        self._intel_table.setRowCount(len(rows))
+        for i, r in enumerate(rows):
+            vals = (r.hash[:12], r.profile.scheme or "?",
+                    str(r.times_seen),
+                    datetime.fromtimestamp(r.last_seen).strftime("%Y-%m-%d"))
+            for j, val in enumerate(vals):
+                item = QTableWidgetItem(val)
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                self._intel_table.setItem(i, j, item)
+
+    def _update_identity(self, dump) -> None:
+        """Fingerprint de la captura: hash + veces vista (intel DB del proyecto)."""
+        from ...core import fingerprint
+        try:
+            profile = fingerprint.profile_from_dump(dump)
+        except Exception:
+            profile = None
+        self._profile = profile
+        if profile is None:
+            self._identity.setText("Captura sin datos de aplicación: sin identidad.")
+            return
+        proj = store.active_project()
+        if not proj:
+            self._identity.setText(f"{profile.hash[:16]}…\n"
+                                   "Sin proyecto activo: no se consulta la intel DB.")
+            return
+        try:
+            from ...project.inteldb import IntelDB
+            with IntelDB(proj) as db:
+                row = db.upsert_card(profile)
+        except Exception:
+            self._identity.setText(f"{profile.hash[:16]}…\n"
+                                   "No se pudo consultar la intel DB.")
+            return
+        veces = "vez" if row.times_seen == 1 else "veces"
+        self._identity.setText(
+            f"{profile.hash[:16]}…  {profile.scheme or '?'}\n"
+            f"Vista {row.times_seen} {veces} en el proyecto · "
+            f"última {datetime.fromtimestamp(row.last_seen):%Y-%m-%d %H:%M}"
+            + (f"\nNota: {row.notes}" if row.notes else ""))
+        self._reload_intel_table()
+
+    def _intel_recs(self) -> None:
+        """Diálogo con el top-5 de recomendaciones para el hash mostrado."""
+        profile = getattr(self, "_profile", None)
+        if profile is None:
+            self.win.notify.emit("Captura una tarjeta primero (la identidad da el hash).")
+            return
+        proj = store.active_project()
+        if not proj:
+            self.win.notify.emit("Sin proyecto activo: no hay intel DB que consultar.")
+            return
+        try:
+            from ...project.inteldb import IntelDB
+            with IntelDB(proj) as db:
+                recs = db.recommend_for(profile.hash)
+        except Exception as e:  # noqa: BLE001
+            self.win.notify.emit(f"No se pudieron calcular recomendaciones: {e}")
+            return
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Recomendaciones — {profile.hash[:16]}…")
+        lay = QVBoxLayout(dlg)
+        text = QLabel()
+        text.setWordWrap(True); text.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        if not recs:
+            text.setText("Sin datos de inteligencia para esta tarjeta.")
+        lines = []
+        for i, r in enumerate(recs, 1):
+            notas = []
+            if r.requires_relay:
+                notas.append("requiere relay NFC — EMVy aún no lo integra")
+            if r.combo:
+                notas.append(r.combo)
+            tried = f" (previo: {r.tried.result})" if r.tried else ""
+            lines.append(f"{i}. {r.attack_id} — {r.title}{tried}\n"
+                         f"    {r.reason}" + (f"\n    ⚠ {' · '.join(notas)}" if notas else ""))
+        text.setText("\n\n".join(lines))
+        lay.addWidget(text)
+        btns = QDialogButtonBox(QDialogButtonBox.Close)
+        btns.rejected.connect(dlg.reject); btns.accepted.connect(dlg.accept)
+        lay.addWidget(btns)
+        dlg.exec()
 
     # -- acciones ----------------------------------------------------------
     def _dump_raw(self) -> None:
@@ -176,6 +296,8 @@ class ExplorerPanel(QWidget):
     def _clear(self) -> None:
         self._tree.clear(); self._sel = None
         self._detail.setText("Árbol limpio.")
+        self._identity.setText("Sin captura.")
+        self._profile = None
 
     def _on_item(self, cur, _prev) -> None:
         data = cur.data(0, _DATA) if cur else None
@@ -192,6 +314,44 @@ class ExplorerPanel(QWidget):
         if self._sel.get("suggest"):
             lines.append(f"→ sugerido: {self._sel['suggest']}")
         self._detail.setText("\n".join(lines))
+
+    # -- menú contextual ---------------------------------------------------
+    def _set_all_expanded(self, expanded: bool) -> None:
+        it = QTreeWidgetItemIterator(self._tree)
+        while it.value():
+            it.value().setExpanded(expanded)
+            it += 1
+
+    def _context_menu(self, pos) -> None:
+        item = self._tree.itemAt(pos)
+        if item is not None:
+            self._tree.setCurrentItem(item)
+        sel = self._sel
+        menu = QMenu(self)
+        menu.addAction("Expandir todo", lambda: self._set_all_expanded(True))
+        menu.addAction("Contraer todo", lambda: self._set_all_expanded(False))
+        menu.addSeparator()
+        if item is not None:
+            campo = item.text(0)
+            menu.addAction("Copiar campo", lambda: self._copy_text(campo))
+        act_hex = menu.addAction("Copiar hex", lambda: self._copy("value"))
+        act_ascii = menu.addAction("Copiar ASCII", lambda: self._copy("ascii"))
+        act_tv = menu.addAction("Copiar tag=valor", self._copy_tagval)
+        act_hex.setEnabled(bool(sel and sel.get("value")))
+        act_ascii.setEnabled(bool(sel and sel.get("ascii")))
+        act_tv.setEnabled(bool(sel and sel.get("value")))
+        if sel and sel.get("suggest"):
+            menu.addSeparator()
+            menu.addAction(f"Asignar a variable “{sel['suggest']}”",
+                           lambda: self._assign(name=sel["suggest"]))
+        menu.addSeparator()
+        menu.addAction("Limpiar árbol", self._clear)
+        menu.exec(self._tree.viewport().mapToGlobal(pos))
+
+    def _copy_text(self, text: str) -> None:
+        from PySide6.QtWidgets import QApplication
+        QApplication.clipboard().setText(text)
+        self.win.notify.emit(f"Copiado: {text[:48]}")
 
     def _copy(self, key: str) -> None:
         if not self._sel:
@@ -213,7 +373,7 @@ class ExplorerPanel(QWidget):
         QApplication.clipboard().setText(f"{self._sel.get('tag') or '?'}={self._sel['value']}")
         self.win.notify.emit("Copiado tag=valor.")
 
-    def _assign(self) -> None:
+    def _assign(self, name: str | None = None) -> None:
         if not self._sel:
             self.win.notify.emit("Selecciona un nodo con valor.")
             return
@@ -221,7 +381,9 @@ class ExplorerPanel(QWidget):
         if not proj:
             self.win.notify.emit("No hay proyecto activo.")
             return
-        name = self._varname.text().strip() or self._sel.get("suggest") or ""
+        from_field = name is None
+        if from_field:
+            name = self._varname.text().strip() or self._sel.get("suggest") or ""
         if not name:
             self.win.notify.emit("Indica un nombre de variable.")
             return
@@ -244,7 +406,8 @@ class ExplorerPanel(QWidget):
         except Exception as e:  # noqa: BLE001
             self.win.notify.emit(f"No se pudo asignar: {e}")
             return
-        self._varname.clear()
+        if from_field:
+            self._varname.clear()
         self.win.refresh_all()
         self.win.notify.emit(f"{name} = {value_str}  → guardado ({kind}).")
 
@@ -319,6 +482,7 @@ class ExplorerPanel(QWidget):
 
     # -- poblar el árbol (lo llama MainWindow tras capturar) ---------------
     def show_dump(self, dump) -> None:
+        self._update_identity(dump)
         self._tree.clear()
         blobs = {b["source"]: b["hex"] for b in dump.blobs}
         for app in dump.applications:

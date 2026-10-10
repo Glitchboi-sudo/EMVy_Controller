@@ -15,6 +15,7 @@ from textual.widgets import TabbedContent, TabPane
 
 from .flags import FlagsScreen
 from .iso8583 import Iso8583Screen
+from .sessions import SessionsScreen
 from .write import WriteScreen
 
 
@@ -27,6 +28,8 @@ class ToolsScreen(Vertical):
                 yield Iso8583Screen(id="screen-iso8583")
             with TabPane("Escritura", id="tool-write"):
                 yield WriteScreen(id="screen-write")
+            with TabPane("Sesiones", id="tool-sessions"):
+                yield SessionsScreen(id="screen-sessions")
 
     def show_tool(self, tab_id: str) -> None:
         try:

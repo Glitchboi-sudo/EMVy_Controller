@@ -38,7 +38,8 @@ def win(qapp, tmp_path, monkeypatch):
 
 def test_tools_subtabs_and_iso_build(win):
     tp = win.tools_panel
-    assert [tp.tabText(i) for i in range(tp.count())] == ["Flags", "ISO 8583", "Escritura"]
+    assert [tp.tabText(i) for i in range(tp.count())] == \
+        ["Flags", "ISO 8583", "Escritura", "Sesiones"]
     tp.iso._de.setText("3"); tp.iso._val.setText("000000"); tp.iso._set()
     tp.iso._build()
     assert "Construido:" in tp.iso._log.toPlainText()
@@ -113,17 +114,20 @@ def test_fuzz_emit_dispatches_by_source(win):
     """El botón único 'Emular' elige NFC o EMV según el MODO de la Fuente."""
     fz = win.fuzz_panel
     calls = []
-    win.emit_emv = lambda card=None: calls.append(("emv",))    # stubs: sin hardware
+    win.emit_emv = lambda card=None, cid="40": calls.append(("emv", cid))  # stubs: sin hardware
     win.emit_ndef = lambda h: calls.append(("ndef", h))
     # Fuente NFC (tarjeta de prueba) -> emit_ndef con el hex generado
     fz._ndef_src.setCurrentIndex(fz._ndef_src.findData("test"))
     fz._gen_ndef()
     fz._emit()
     assert calls[-1][0] == "ndef" and calls[-1][1]
-    # Fuente EMV -> emit_emv (perfilar terminal)
+    # Fuente EMV -> emit_emv con la decisión del combo (default TC)
     fz._ndef_src.setCurrentIndex(fz._ndef_src.findData("emv"))
     fz._emit()
-    assert calls[-1] == ("emv",)
+    assert calls[-1] == ("emv", "40")
+    fz._emv_cid.setCurrentIndex(fz._emv_cid.findData("80"))      # ARQC también fluye
+    fz._emit()
+    assert calls[-1] == ("emv", "80")
 
 
 def test_fuzz_emv_source_uses_capture(win):
@@ -139,7 +143,7 @@ def test_fuzz_emv_source_uses_capture(win):
 
     fz = win.fuzz_panel
     cards = []
-    win.emit_emv = lambda card=None: cards.append(card)
+    win.emit_emv = lambda card=None, cid="40": cards.append(card)
     fz._ndef_src.setCurrentIndex(fz._ndef_src.findData("emv"))   # → _reload_captures(canned+RAM)
     fz._ndef_cap.setCurrentIndex(fz._ndef_cap.findText("mc1"))   # la captura guardada
     fz._emit()
@@ -155,7 +159,7 @@ def test_fuzz_emv_ram_sources(win):
     from emvy.payments import EmvCard
     fz = win.fuzz_panel
     calls = []
-    win.emit_emv = lambda card=None, from_ram=False: calls.append((card, from_ram))
+    win.emit_emv = lambda card=None, from_ram=False, cid="40": calls.append((card, from_ram))
     fz._ndef_src.setCurrentIndex(fz._ndef_src.findData("emv"))   # puebla el picker (canned+RAM+capturas)
     # RAM del BomberCat
     fz._ndef_cap.setCurrentIndex(fz._ndef_cap.findData("__ram__"))
@@ -375,3 +379,29 @@ def test_console_formatting_does_not_crash(win):
     c.wire("rx", "ERR:NOCARD", "serial")
     c.info("nota")
     assert c._log.toPlainText()          # algo se escribió
+
+
+def test_fuzz_mutations_subtab(win):
+    """5ª sub-pestaña Mutaciones: diff del playbook sobre el dump activo.
+    Sin dump no inventa tarjeta: pide capturar primero."""
+    fz = win.fuzz_panel
+    assert [fz._sub.tabText(i) for i in range(fz._sub.count())] == [
+        "Editor de tarjeta", "Emulación NFC/EMV", "Registro EMV",
+        "Banda magnética", "Mutaciones"]
+
+    win.last_dump = None
+    fz._mut_preview()
+    assert "captura una tarjeta primero" in fz._mut_out.toPlainText()
+    assert "inyección planificada" in fz._mut_out.toPlainText()
+
+    dump = CardDump(applications=[{
+        "aid": "A0000000031010", "scheme": "Visa", "source": "ppse", "label": "VISA",
+        "cardholder": {}, "aip": "3900", "afl": "0801010010010200",
+        "records": [{"sfi": 1, "record": 1, "hex": "700A8C069F02069F0306"}],
+        "get_data": {},
+    }], blobs=[])
+    win.last_dump = dump
+    fz._mut_pb.setCurrentIndex(fz._mut_pb.findData("COMBO-B"))
+    fz._mut_preview()
+    text = fz._mut_out.toPlainText()
+    assert "AFL skip_signed" in text and "→" in text     # diff real

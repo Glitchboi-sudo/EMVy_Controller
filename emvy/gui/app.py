@@ -73,6 +73,7 @@ class MainWindow(QMainWindow):
         self.card_atr: str | None = None
         self.intercept_rules: list = []
         self.intercept_active: bool = False
+        self.pcap_tap = None              # PcapTap activo (grabación .pcap de la sesión)
         import threading
         self._emu_stop = threading.Event()   # señal para detener la emulación NDEF
         self._scanned_card = None            # tarjeta escaneada a memoria (RAM app), EmvCard
@@ -269,6 +270,12 @@ class MainWindow(QMainWindow):
         self._chip_card = Chip("Sin tarjeta", "off")
         for c in (self._chip_proj, self._chip_rdr, self._chip_card):
             row.addWidget(c, 0, Qt.AlignVCenter)
+        self._pcap_btn = button("PCAP", icon_name="radio", on_click=self._toggle_pcap)
+        self._pcap_btn.setCheckable(True)
+        self._pcap_btn.setToolTip(
+            "Graba todo el tráfico APDU de la sesión (capturas, consola, escritura, "
+            "ataques) en un .pcap abierto directo en Wireshark")
+        row.addWidget(self._pcap_btn, 0, Qt.AlignVCenter)
         self._topbar_cta = button("Capturar", variant="primary", icon_name="search",
                                   on_click=lambda: self._quick_capture())
         row.addWidget(self._topbar_cta, 0, Qt.AlignVCenter)
@@ -281,6 +288,55 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         self.capture("auto")
+
+    # -- grabación pcap de la sesión ----------------------------------------
+    def _pcap_path(self):
+        """Ruta del próximo .pcap: artifacts/ del proyecto activo, o el artifacts/
+        global del data home si no hay proyecto."""
+        from datetime import datetime
+        from .. import config
+        proj = store.active_project()
+        d = proj.artifacts_dir if proj else config.data_home() / "artifacts"
+        d.mkdir(parents=True, exist_ok=True)
+        return d / f"sniff-{datetime.now().strftime('%Y%m%d-%H%M%S')}.pcap"
+
+    def _toggle_pcap(self, checked: bool) -> None:
+        from .components import _repolish
+        if checked:
+            if self.pcap_tap is not None:
+                return
+            from ..core.pcap import PcapTap
+            try:
+                self.pcap_tap = PcapTap(self._pcap_path())
+            except OSError as e:
+                self._pcap_btn.setChecked(False)
+                self.notify.emit(f"No se pudo iniciar la grabación pcap: {e}")
+                return
+            self._pcap_btn.setProperty("variant", "danger")
+            _repolish(self._pcap_btn)
+            self.notify.emit(f"Grabando APDUs → {self.pcap_tap.path}")
+        else:
+            tap = self.pcap_tap
+            self.pcap_tap = None
+            self._pcap_btn.setProperty("variant", "")
+            _repolish(self._pcap_btn)
+            if tap is None:
+                return
+            tap.close()
+            msg = f"PCAP guardado: {tap.path} ({tap.exchanges} intercambio(s))."
+            if tap.error:
+                msg += f" Aviso: error de escritura ({tap.error})."
+            self.notify.emit(msg)
+
+    def closeEvent(self, event) -> None:  # noqa: N802 (API de Qt)
+        """Al cerrar la ventana se cierra la grabación pcap abierta (si hay)."""
+        if self.pcap_tap is not None:
+            try:
+                self.pcap_tap.close()
+            except Exception:
+                pass
+            self.pcap_tap = None
+        super().closeEvent(event)
 
     def _set_page_title(self, tab_id: str) -> None:
         if not (hasattr(self, "_page_title") and tab_id):
@@ -347,9 +403,13 @@ class MainWindow(QMainWindow):
         send = self.reader.transceive
         if self.intercept_active and self.intercept_rules:
             from ..core import intercept
-            return intercept.intercepting(
+            send = intercept.intercepting(
                 send, self.intercept_rules,
                 on_event=lambda ex: self.intercept_event.emit(ex))
+        if self.pcap_tap is not None:
+            # el más externo: graba lo que realmente sale al lector (comandos
+            # ya mutados por el interceptor incluidos)
+            send = self.pcap_tap.wrap(send)
         return send
 
     # -- traza en vivo → consola cruda -------------------------------------
@@ -545,6 +605,16 @@ class MainWindow(QMainWindow):
                on_result=lambda out: self.console.info(f"magspoof: {out}"),
                on_error=lambda m: self.notify.emit(f"magspoof: {m}"))
 
+    def _on_emu_line(self, line: str) -> None:
+        """Línea de wire de emulación → consola cruda y, si la grabación pcap
+        está activa, también al .pcap (la emulación no pasa por `active_send`:
+        el intercambio lo hace el firmware del BomberCat y solo lo vemos como
+        líneas EMU:RX/EMU:TX con el APDU completo en hex)."""
+        self.console.wire("rx", line, "emu")
+        tap = self.pcap_tap
+        if tap is not None:
+            tap.record_wire_line(line)
+
     def emit_ndef(self, ndef_hex: str) -> None:
         from ..readers import bombercat
         devs = [d for d in registry.list_all_devices() if d.backend == "bombercat"]
@@ -559,10 +629,10 @@ class MainWindow(QMainWindow):
                    devs[0], ndef_hex, timeout=None, stop=self._emu_stop.is_set,
                    on_line=progress),
                want_progress=True,
-               on_line=lambda l: self.console.wire("rx", l, "emu"),
+               on_line=self._on_emu_line,
                on_error=lambda m: self.notify.emit(f"NDEF EMU: {m}"))
 
-    def emit_emv(self, card=None, from_ram: bool = False) -> None:
+    def emit_emv(self, card=None, from_ram: bool = False, cid: str = "40") -> None:
         from ..readers import bombercat
         devs = [d for d in registry.list_all_devices() if d.backend == "bombercat"]
         if not devs:
@@ -572,14 +642,16 @@ class MainWindow(QMainWindow):
         who = ("RAM del BomberCat" if from_ram else
                "tarjeta de prueba" if card is None else
                f"captura (PAN {card.pan_digits or '?'})")
-        self.console.banner(f"emulación de tarjeta EMV [{who}] — acerca el "
-                            "terminal/POS (Detener para parar)")
+        decision = {"40": "aprueba offline (TC)", "80": "pide online (ARQC)",
+                    "00": "declina (AAC)"}.get(cid, cid)
+        self.console.banner(f"emulación de tarjeta EMV [{who}] — {decision} — "
+                            "acerca el terminal/POS (Detener para parar)")
         submit(self.pool,
                lambda progress=None: bombercat.emv_emulate(
-                   devs[0], card=card, from_ram=from_ram, timeout=None,
+                   devs[0], card=card, from_ram=from_ram, cid=cid, timeout=None,
                    stop=self._emu_stop.is_set, on_line=progress),
                want_progress=True,
-               on_line=lambda l: self.console.wire("rx", l, "emu"),
+               on_line=self._on_emu_line,
                on_error=lambda m: self.notify.emit(f"EMV EMU: {m}"))
 
     def scan_to_memory(self, then=None) -> None:

@@ -21,6 +21,7 @@ _SECTIONS = (
         ("f", "Flags — busca flags en la última captura"),
         ("8", "ISO 8583 — constructor + traducción + envío"),
         ("w", "Escritura — UPDATE RECORD/BINARY, PUT DATA…"),
+        ("s", "Sesiones — grabaciones APDU del proyecto (ver / replay)"),
     )),
     ("Copiar al portapapeles", (
         ("Ctrl+C", "copia: nodo del árbol · fila de tabla · selección de texto"),

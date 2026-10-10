@@ -106,7 +106,7 @@ emvy bombercat setup                 # prepara el framework oficial (venv aislad
 emvy bombercat read --save cap1      # lee EMV contactless → captura
 emvy bombercat dump [--raw] [--save nombre]
 emvy bombercat write record|binary|data|append ...
-emvy bombercat emv-emulate [--card cap.json] [--ram]   # perfilar terminales EMV
+emvy bombercat emv-emulate [--card cap.json] [--ram] [--cid 40|80|00]  # perfilar terminales EMV (cid: 40=TC cobro completa offline · 80=ARQC online · 00=AAC)
 emvy bombercat fw list | flash <NOMBRE>
 emvy bombercat devices | status | tags | readers | reboot
 ```

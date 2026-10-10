@@ -41,6 +41,19 @@ emvy/
 │   ├── oda.py       ODA: inventario, claves débiles y recuperación/verificación RSA del cert. del emisor
 │   ├── analyze.py   assess(tlvs) → informe combinado (AIP/CVM/ODA) + hallazgos + summary()
 │   ├── intercept.py motor de reglas MITM (reescribe tag/valor, set-sw) + intercepting(send,rules)
+│   ├── mutations.py motor de mutaciones ATRIUM (5 familias: PDOL/AFL/DOL/TLV-respuesta/inyecciones)
+│   │                + playbooks COMBO-A…E (emv/core/playbooks.py); apply_command/apply_response +
+│   │                mutating(send,config) (mismo contrato que intercepting) + preview_dump (offline)
+│   ├── sessionlog.py logging estructurado PURO: LogSession/LogExchange (JSON round-trip), split_sessions
+│   │                (SELECT AID abre, GENERATE AC/timeout cierra), hexlog PC/SC (to/parse), extract_cryptograms
+│   │                (con importe resuelto del PDOL 9F38), replay_plan, convert (hexlog⇄json)
+│   ├── apduprint.py APDU printer puro: comandos CLA-aware + SW categorizados (diccionarios ISO 7816
+│   │                traducidos de ATRIUM) + TLV parseado con guarda de round-trip; sw_category() para colorear
+│   ├── fingerprint.py perfil normalizado de tarjeta CardProfile (frozen, hash SHA-256 estable que EXCLUYE
+│   │                lo volátil: ATC/UN/fechas/track2) + profile_from_tlvs/profile_from_dump + summary_lines
+│   ├── intel.py inteligencia cross-session PURO: KNOWN_ATTACKS (ATTACK-1…11 traducidos, conditions,
+│   │                requires_relay) + recommend() (parciales→condiciones del perfil→prerrequisitos COMBO→canónico)
+│   │                + cross_card_patterns()
 │   ├── search.py    Blob/Hit + búsqueda de flags/regex
 │   └── gp/          GlobalPlatform (extra [gp]=pycryptodome): keyset (modelo Keyset), crypto (SCP02 3DES / SCP03 AES: derivación, criptogramas, KDF, retail-MAC, ICV), apdu (comandos GP), scp (Secure Channel sobre Transceiver + wrap C-MAC/C-ENC, autodetección), cap (parseo CAP→Load File Data Block), content (authenticate/get_status [AppInfo.modules = AIDs de módulos instanciables, tag 84]/list_modules/delete/**restore_virgin** [deja la tarjeta 'virgen': borra instancias que no sean ISD/SD/keep_aids; opcional delete_packages]/install_cap [carga+instancia un CAP EMV abierto] + **install_instance** [instancia un módulo YA cargado: INSTALL [for install] — "inicializar" la tarjeta sin cargar código] + **smart_write**: escritura inteligente — prueba la escritura directa y, si la tarjeta exige canal seguro [SW 6982/6985], abre GP con un keyset y reintenta la escritura envuelta; devuelve `SmartWriteResult` con log del proceso). Escribir/gestionar JavaCards
 ├── readers/     ── EFECTOS: transporte hacia el hardware (aísla pyscard/nfcpy/evdev/pyserial)
@@ -57,10 +70,16 @@ emvy/
 │   └── cryptogram.py análisis ATC/ARQC/UN (replay/reuso) sobre capturas
 ├── session/     ── captura de tarjeta sobre `send`
 │   ├── model.py     CardDump serializable (JSON) + app_to_dict/fci_hex + from_bombercat()
-│   └── capture.py   capture_card()/capture_reader()/find_flags()
+│   ├── capture.py   capture_card()/capture_reader()/find_flags()
+│   └── recorder.py  SessionRecorder (efecto): wrap(send) graba LogExchange por intercambio lógico;
+│                     save_all() → <proyecto>/sessions/<sid>.json + sessions.hexlog + cryptograms.jsonl
+│                     (sin proyecto: no escribe, pending en memoria); replay_session(session,send) regresión
 ├── project/     ── proyectos + variables de entorno (persistencia)
 │   ├── model.py     Project (captures/pocs/poc_runs/logs dirs), Variable (frozen)
 │   ├── store.py     CRUD proyectos + activo + capturas + import_capture + poc_runs + save_log/list_logs (logs/) + export/import (.zip)
+│   ├── inteldb.py   IntelDB: SQLite WAL en <proyecto>/intel.db (tablas cards/attacks); upsert_card
+│   │                (first/last seen, times_seen, preserva notas), add_outcome (success|partial|failed|
+│   │                blocked|error), recommend_for (delega en core.intel), patterns; context manager
 │   ├── env.py       CRUD puro de variables + encoders EMV + alias + IO
 │   └── profiles.py  perfiles de terminal preconfigurados (kiosk/atendido/ATM) aplicables en un paso
 ├── poc/         ── framework de PoCs (runner + plugins del proyecto; sin PoCs integrados)
@@ -76,7 +95,9 @@ emvy/
 ├── gui/         ── interfaz GUI de escritorio (PySide6/Qt) — frontend nativo alternativo a la TUI
 │   ├── app.py       MainWindow: estado de sesión + orquestación de hardware por señales Qt; run_gui()
 │   ├── worker.py    submit()/Worker(QRunnable): operaciones de hardware fuera del hilo GUI, con progreso por señales (mantiene vivos los workers en `_ACTIVE` + `setAutoDelete(False)`: si no, el pool los auto-borra y las señales `result`/`error` en cola se pierden)
-│   └── panels/      dashboard, projects, variables, readers, explorer (árbol TLV + inspector), tools (Flags/ISO8583/Escritura), charges (Cobros), poc, intercept, firmware (**ADR-001: un Tab por firmware BomberCat** — `DevicePanel` control-plane [estado/flasheo/permisos USB/compilar propio, posee el puerto serie único] + gated por capacidad `TagsPanel`/`ReadersPanel`/`MagspoofPanel`/`MifarePanel`/`RelayPanel`; `BaseFirmwarePanel` centraliza gating+pill de estado+log; orquestados vía `integrations.bombercat_tools` [subprocess al venv del vendor]), fuzz (emulación: Fuente decide NFC-NDEF [plantilla/tarjeta-de-prueba/captura] o EMV [perfilar terminal]), console (consola cruda: TX/RX completo + Exportar/Guardar en proyecto)
+│   └── panels/      dashboard, projects, variables, readers, explorer (árbol TLV + inspector: Identidad de
+│                    tarjeta [hash + veces vista] e Intel [tabla + recomendaciones]), tools (Flags/ISO8583/
+│                    Escritura/Sesiones), charges (Cobros), poc, intercept, firmware (**ADR-001: un Tab por firmware BomberCat** — `DevicePanel` control-plane [estado/flasheo/permisos USB/compilar propio, posee el puerto serie único] + gated por capacidad `TagsPanel`/`ReadersPanel`/`MagspoofPanel`/`MifarePanel`/`RelayPanel`; `BaseFirmwarePanel` centraliza gating+pill de estado+log; orquestados vía `integrations.bombercat_tools` [subprocess al venv del vendor]), fuzz (emulación: Fuente decide NFC-NDEF [plantilla/tarjeta-de-prueba/captura] o EMV [perfilar terminal] + sub-pestaña Mutaciones COMBO), console (consola cruda: TX/RX completo + Exportar/Guardar en proyecto)
 ├── cli.py       ── CLI (argparse) sobre todo lo anterior; main() aplica settings al arrancar
 ├── config.py    ── rutas XDG (datos/config); data_home() honra override de ajustes/EMVY_DATA_HOME; repo_root() = sys._MEIPASS al empaquetar (PyInstaller)
 ├── settings.py  ── PREFERENCIAS globales (tema/idioma/carpeta de datos) → <config>/settings.json; apply() empuja data_dir a config y idioma a i18n
@@ -205,8 +226,9 @@ uv pip install --python .venv 'emvyctl[gui]'   # o: PySide6
 Frontend **nativo** alternativo a la TUI (para quien prefiere ventana de escritorio). Reutiliza el
 mismo núcleo puro; `emvy/gui/`. **Paridad de pestañas con la TUI**: **Inicio** (estado + proyectos
 recientes + acciones rápidas), **Proyectos**, **Variables** (+perfiles), **Lectores**, **Explorador**
-(capturar → árbol TLV con inspector: copiar hex/ASCII, asignar a variable, guardar captura),
-**Herramientas** (sub-tabs Flags · ISO 8583 · **Escritura**: UX **guiada por intención** —una barra de
+(capturar → árbol TLV con inspector: copiar hex/ASCII, asignar a variable, guardar captura, más
+**Identidad de tarjeta** [hash + veces vista] e **Intel** [tabla del proyecto + recomendaciones]),
+**Herramientas** (sub-tabs Flags · ISO 8583 · Sesiones [visor/replay de `<proyecto>/sessions/`] · **Escritura**: UX **guiada por intención** —una barra de
 **canal seguro** (keyset + C-ENC) compartida arriba, con hint que dice si se autenticará sola; luego dos
 pestañas (GUI `QTabWidget`, TUI `TabbedContent`) + un log común abajo—: **«Personalizar»** (amistoso, por
 defecto) con **preset** (Visa/Mastercard/Amex de prueba / Personalizado) que rellena PAN/caducidad/titular/
@@ -257,7 +279,8 @@ BomberCat/Fuzzing) y se **oculta** en Inicio/Proyectos/Variables (vía `currentC
 La pestaña **Inicio** es un **centro de operaciones**: tarjetas de estado (proyecto/lector/tarjeta),
 "siguiente paso" como **botón de acción** contextual, **capturas del proyecto** (doble clic → abre en el
 Explorador), lista de proyectos (doble clic → activar) y accesos rápidos. La pestaña **Fuzzing** agrupa sus
-herramientas en **sub-pestañas** (Editor de tarjeta · Emulación NFC/EMV · Registro EMV · Banda magnética)
+herramientas en **sub-pestañas** (Editor de tarjeta · Emulación NFC/EMV · Registro EMV · Banda magnética ·
+Mutaciones —vista previa de playbooks COMBO sobre el dump activo—)
 para no apilar todo — los widgets/IDs no cambian. **Iconografía SVG** (estilo Lucide, sin emojis) vía
 `emvy/gui/icons.py::icon(name, color, size)` (renderiza SVG inline → `QIcon` con `QtSvg`, sin ficheros):
 iconos en las 11 pestañas principales (`MainWindow._apply_tab_icons`) y en los CTAs (Emular/Detener/Reboot,
@@ -283,7 +306,9 @@ acción sugerida, **proyectos recientes** clicables — incluye engagements —,
 atendido, contacto genérico, ATM— aplicables en un paso) · **Lectores** (descubrir/conectar) · **Explorador**
 (layout de **dos paneles**: a la izquierda el **árbol TLV** (panel bordeado, ocupa la mayor parte); a la
 derecha un **inspector** (`VerticalScroll`) que agrupa las acciones contextuales en secciones —NODO
-SELECCIONADO (detalle tag/valor/ascii + copiar hex/ASCII/tag=val), ASIGNAR A VARIABLE, GUARDAR CAPTURA—;
+SELECCIONADO (detalle tag/valor/ascii + copiar hex/ASCII/tag=val), ASIGNAR A VARIABLE, GUARDAR CAPTURA,
+más IDENTIDAD DE TARJETA (hash SHA-256 estable + "vista N veces" leyendo `<proyecto>/intel.db`) e INTEL
+(tabla `CopyableDataTable` de tarjetas del proyecto + botón Recomendaciones → modal top-5 ATRIUM)—;
 barra de acciones arriba y consola en vivo colapsable al pie. Solo dos botones de captura, agrupados
 aparte de Analizar/Limpiar: **Capturar tarjeta** —siempre
 `mode="auto"`: prueba EMV y si no hay apps cae solo a NFC genérico, sin pedir de antemano qué tipo de
@@ -311,7 +336,9 @@ capa de transporte propia (PC/SC, NFC) el `TraceEvent` de APDU ya es el comando 
 —incluido GET RESPONSE/Le-retry—, así que no emiten `on_wire`. Vive en el Explorador y no en Consola
 porque es justo ahí donde se está capturando) ·
 **Consola** (agrupa en sub-pestañas: **Flags** sobre la última captura · **ISO 8583** constructor +
-traducción + envío TCP · **Escritura** en tarjeta) · **Cobros** (flujo de switch de primer nivel: crear cobro → sign-on 0800 → 0200 con
+traducción + envío TCP · **Escritura** en tarjeta · **Sesiones** —graba con `-R` o desde las UI—:
+lista las sesiones del `<proyecto>/sessions/`, Ver abre un modal con el APDU printer, Reproducir
+reenvía los comandos a la tarjeta conectada [regresión]) · **Cobros** (flujo de switch de primer nivel: crear cobro → sign-on 0800 → 0200 con
 F55/ARQC → seguir F39 → reverso; config por variables del proyecto; evidencia en `<proy>/transactions/`)
 · **PoC** · **Intercept** (MITM: reglas que reescriben tag/valor y fuerzan SW; al activarse todo el
 tráfico de la sesión pasa por ellas) · **BomberCat** (gestiona y **flashea firmware**: lista 📦 release (bombercat-tools) + ⬇ descargados de
@@ -319,10 +346,11 @@ tráfico de la sesión pasa por ellas) · **BomberCat** (gestiona y **flashea fi
 compilado; **compila** los sketches de `firmware/` con arduino-cli (Compilar / Compilar y subir);
 lista dispositivos y prepara el venv) · **Fuzzing** (plantillas para probar terminales/POS reales —
 banda magnética mutada vía magspoof + registro EMV mutado para escribir en tarjeta de prueba—,
-editables antes de disparar; ver §9.1). La barra principal es `TabbedContent#main-tabs`; `ToolsScreen`
-(`#screen-tools`) hospeda las sub-herramientas (ids `#screen-flags/-iso8583/-write`; `#screen-console`
+editables antes de disparar; ver §9.1 — más el **carril Mutaciones**: selector de playbooks COMBO-A…E con
+vista previa del diff sobre la captura activa, vía `core.mutations.preview_dump`). La barra principal es `TabbedContent#main-tabs`; `ToolsScreen`
+(`#screen-tools`) hospeda las sub-herramientas (ids `#screen-flags/-iso8583/-write/-sessions`; `#screen-console`
 vive ahora en el Explorador). Atajos: `p v l e b o i m u` (pestañas; `e`=Explorador —incluye la
-consola APDU—, `m`=BomberCat, `u`=Fuzzing) y `f 8 w` (Consola → Flags/ISO/Escritura), `r` refrescar,
+consola APDU—, `m`=BomberCat, `u`=Fuzzing) y `f 8 w s` (Consola → Flags/ISO/Escritura/Sesiones), `r` refrescar,
 `q` salir, **`?` abre el modal de Ayuda** (`HelpScreen`, `screens/help.py`) con todos los atajos
 agrupados + el flujo de pentest sugerido. El **footer** solo muestra los esenciales (`q`/`?`/`r`); el
 resto de bindings están activos pero `show=False` (antes se desbordaba con 14). Las operaciones de
@@ -408,6 +436,18 @@ echo 0210302000... | ./emvyctl.py iso -       # desde stdin (alias 'iso')
 Selección de lector: `-r <índice|nombre|backend|id>`. El **perfil de terminal** para el GPO sale
 del **proyecto activo** (o del por defecto si no hay ninguno).
 
+# Integración ATRIUM (docs/atrium/): motor de mutaciones, logging y fingerprint/intel
+./emvyctl.py mutations list                        # familias + playbooks COMBO-A…E
+./emvyctl.py mutations show COMBO-C                # detalle de un playbook (reglas + inyecciones)
+./emvyctl.py mutations run COMBO-B --file card.json  # preview offline del diff sobre una captura
+./emvyctl.py mutations run COMBO-A -r 0            # live: flujo EMV corto con el send mutado
+./emvyctl.py -R dump --save cap1                   # -R/--record: graba sesiones en <proyecto>/sessions/
+./emvyctl.py log list|show <sid>|replay <sid> [-r 0]|convert <fich>  # sesiones, visor printer, replay, conversión
+./emvyctl.py fingerprint [--file card.json] [-o perfil.json]  # perfil + hash; upsertea en <proyecto>/intel.db
+./emvyctl.py intel list|show <hash>|note <hash> "…"|record <hash> --attack ATTACK-3 --result partial
+./emvyctl.py intel recommend <hash>                # top-5 qué probarle a esta tarjeta
+./emvyctl.py intel patterns                        # patrones cross-card
+
 ### Como librería
 ```python
 from emvy.readers import registry
@@ -451,6 +491,10 @@ with registry.open_device(dev) as r:
 ```
 - `tests/fakecard.py` — tarjeta Mastercard **simulada** (un `Transceiver` falso). Base para probar
   todo el flujo EMV sin hardware.
+- `tests/test_mutations.py` — motor de mutaciones (round-trip config, 7 modos TLV, on_ins, inyecciones, `mutating()` sobre fake card, los 5 COMBO).
+- `tests/test_sessionlog.py` / `test_apduprint.py` / `test_recorder.py` — sesiones (split/hexlog round-trip/cryptograms/replay) y el APDU printer.
+- `tests/test_fingerprint.py` / `test_intel.py` / `test_inteldb.py` — hash estable (mismo dump ⇒ mismo hash, volátil excluido), recomendador y SQLite en proyecto tmp.
+- `tests/test_tui_sessions.py` / `test_gui_sessions.py` / `test_explorer_intel.py` — smokes UI de las piezas ATRIUM.
 - `tests/test_core.py` — TLV parse/encode roundtrip, DOL, APDU, `make_transceiver` (61/6C), ATR,
   AID, track, búsqueda de flags.
 - `tests/test_emv_flow.py` — discover/select/GPO/AFL, PDOL desde perfil, cardholder, inmutabilidad,
@@ -739,6 +783,18 @@ inicializa con `submodules: recursive`.
 > propio de EMVy** vía `emvy/readers/bombercat.py`, no los protocolos tags/mifare/relay del vendor →
 > los paneles gated de esas capacidades siguen deshabilitados con EMVyBomberCat, que es lo correcto).
 > Es una adición **local**: si se resetea el submódulo (`git submodule update`), reaplícala.
+>
+> **Compatibilidad bidireccional con el rework upstream** (firmware
+> `bombercat-firmware` v1.1.x + `bombercat-tools` v1.4.0): el host
+> (`emvy/readers/bombercat.py`) habla **ambos** dialectos serie — salta el banner
+> de boot `+OK bombercat ready` al esperar el ack de PING (`_wait_ping_ack`),
+> acepta INFO con `:role` y/o `:state` (`parse_info`/`device_info`), y parsea
+> `EMU:CARD` con `cid=` opcional y `GENERATE-AC` con el token `da=` opcional
+> (`parse_emu_card`/`parse_generate_ac`; el hex es siempre el último token).
+> El firmware local va en el sentido contrario: dispatcher **case-insensitive**
+> (todos los verbos, no solo ping/info/identify), INFO con `:state idle|emulating`
+> (además de `:role`) y banner `+OK bombercat ready` al boot. Ver README §Contrato
+> y §"Dialecto EMU" del firmware.
 >
 > **Puerto serie único (caveat de operación):** la BomberCat expone **un** `/dev/ttyACM*`. Mientras
 > EMVy tiene el **lector BomberCat conectado** (pestaña Lectores → el proceso mantiene el puerto

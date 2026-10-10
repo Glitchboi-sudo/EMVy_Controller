@@ -50,6 +50,10 @@ hacia el POS. Investigado y descartado por ahora:
   BomberCat o el teléfono rooteado): integrar `bombercat relay`/`capture` desde
   EMVy (CLI/TUI) y, si el tap de `capture` lo permite, aplicar reglas de
   `core.intercept` sobre el flujo relevado en vivo.
+  **Vía alternativa sin hardware nuevo** (documentada en `docs/atrium/05-relay-mitm-y-hardware.md`):
+  relay de **contacto** con el módulo kernel **vpcd** + vsmartcard sirviendo la tarjeta real del
+  PC/SC reader como tarjeta virtual del SO; `core.mutations` (`mutating()`) y `core.intercept`
+  (`intercepting()`) ya tienen el contrato listo para vivir en ese path. Pendiente: `emvy relay start/stop`.
 
 ## NFC multi-protocolo (overhaul completo — diferido)
 
@@ -84,9 +88,10 @@ Ya hay una captura real (BomberCat genuino) para usar de ejemplo.
   también en la TUI (pestaña Proyectos) — hoy solo CLI.
 - Mover la documentación extensa del dashboard a una pantalla Help/Wiki propia,
   para que Inicio se mantenga corto (Fase 5 del rediseño original).
-- Ampliar `core.cardfuzz` con más mutaciones si surgen casos de prueba nuevos
-  contra terminales reales (p.ej. variantes de TTQ, PDOL con longitudes
-  inválidas, respuestas GPO fuera de rango).
+- ~~Ampliar `core.cardfuzz` con más mutaciones~~ — cubierto por el **motor de mutaciones ATRIUM**
+  (`core/mutations.py` + playbooks COMBO-A…E, ver §docs/atrium y CLAUDE.md). Pendiente solo el
+  aplicador en caliente sobre `emv-emulate` (requiere extender el protocolo `EMUEMV:` del firmware,
+  que hoy solo acepta aid/pan/exp/track2) y, cuando exista relay, las familias PDOL/ATC en el path.
 
 ## GlobalPlatform — escritura/gestión de JavaCards (implementado)
 

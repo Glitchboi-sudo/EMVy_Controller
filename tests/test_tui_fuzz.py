@@ -118,3 +118,51 @@ def test_fuzz_tab_ndef(monkeypatch):
         asyncio.run(scenario())
     finally:
         fakeserial.uninstall()
+
+
+def test_fuzz_tab_mutations_preview():
+    """Carril Mutaciones: selector de playbooks y vista previa sobre el dump
+    activo (con y sin captura en memoria)."""
+    import asyncio
+
+    from textual.widgets import Select
+    from emvy.session.model import CardDump
+    from emvy.tui.app import EmvyApp
+
+    dump = CardDump(applications=[{
+        "aid": "A0000000031010", "scheme": "Visa", "source": "ppse", "label": "VISA",
+        "cardholder": {}, "aip": "3900", "afl": "0801010010010200",
+        "records": [{"sfi": 1, "record": 1, "hex": "700A8C069F02069F0306"}],
+        "get_data": {},
+    }], blobs=[])
+
+    async def scenario():
+        app = EmvyApp()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.action_show("tab-fuzz")
+            await pilot.pause()
+            scr = app.query_one("#screen-fuzz")
+            sel = app.query_one("#fz_mut_pb", Select)
+            assert sel.value == "COMBO-A"
+
+            collected = []
+            scr.log_mut = collected.append
+
+            # sin dump: avisa y lista las inyecciones planificadas (no inventa tarjeta)
+            scr._mut_preview()
+            await pilot.pause()
+            assert any("Sin captura" in l for l in collected)
+            assert any("inyección planificada" in l for l in collected)
+
+            # con dump: diff real del playbook elegido
+            collected.clear()
+            app.last_dump = dump
+            sel.value = "COMBO-B"
+            scr._mut_preview()
+            await pilot.pause()
+            assert any("AFL skip_signed" in l for l in collected)
+            assert any("resp TLV xor 82" in l for l in collected)
+            assert any("→" in l for l in collected)
+
+    asyncio.run(scenario())

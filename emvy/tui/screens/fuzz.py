@@ -14,6 +14,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Button, Input, RichLog, Select, Static
 
 from ...core import cardfuzz
+from ...core import playbooks
 from ...core.hexutil import from_hex, to_hex
 
 
@@ -69,6 +70,15 @@ class FuzzScreen(Vertical):
                                 classes="fz-narrow")
                     yield Button("Escribir", id="fz_card_write", variant="error")
 
+            # -- Mutaciones (motor EMV + playbooks COMBO) -----------------
+            with Vertical(classes="fz-lane", id="fz-lane-mut"):
+                with Horizontal(classes="fz-row"):
+                    yield Select([(f"{p['id']} · {p['title']}", p['id'])
+                                  for p in playbooks.playbooks()],
+                                 value="COMBO-A", allow_blank=False, id="fz_mut_pb")
+                    yield Button("Vista previa", id="fz_mut_preview")
+                yield Static("", id="fz_mut_desc", classes="fz-desc")
+
             # -- NDEF (emular tag NFC vía BomberCat) -----------------------
             with Vertical(classes="fz-lane", id="fz-lane-ndef"):
                 with Horizontal(classes="fz-row"):
@@ -93,6 +103,7 @@ class FuzzScreen(Vertical):
     def on_mount(self):
         for lane, title in (("#fz-lane-track", "Banda magnética · magspoof"),
                             ("#fz-lane-card", "Registro EMV · escribir en tarjeta"),
+                            ("#fz-lane-mut", "Mutaciones · motor EMV + COMBO"),
                             ("#fz-lane-ndef", "NDEF · emular tag NFC")):
             try:
                 self.query_one(lane).border_title = title
@@ -101,6 +112,7 @@ class FuzzScreen(Vertical):
         self._gen_track()
         self._gen_card()
         self._gen_ndef()
+        self._mut_changed_desc()
 
     # -- banda magnética ------------------------------------------------
     @on(Button.Pressed, "#fz_track_gen")
@@ -151,6 +163,34 @@ class FuzzScreen(Vertical):
             return
         self.log(f"[yellow]→ UPDATE RECORD[/] sfi={sfi} rec={record}  {hexval}")
         self.app.write_card_ui("record", {"data": data, "sfi": sfi, "record": record})
+
+    # -- mutaciones (motor EMV + playbooks COMBO) ---------------------------
+    def _mut_changed_desc(self):
+        pb = playbooks.get_playbook(self.query_one("#fz_mut_pb", Select).value)
+        if pb:
+            self.query_one("#fz_mut_desc", Static).update(pb["description"])
+
+    @on(Select.Changed, "#fz_mut_pb")
+    def _mut_changed(self, event: Select.Changed):
+        self._mut_changed_desc()
+
+    @on(Button.Pressed, "#fz_mut_preview")
+    def _mut_preview(self):
+        from ...core import mutations
+        pb = playbooks.get_playbook(self.query_one("#fz_mut_pb", Select).value)
+        if not pb:
+            return
+        config = mutations.MutationConfig.from_dict(pb["config"])
+        self.log(f"[yellow]→ MUT[/] {pb['id']} · {pb['title']}")
+        dump = getattr(self.app, "last_dump", None)
+        if dump is None:
+            self.log_mut("Sin captura en memoria: captura una tarjeta primero "
+                         "(pestaña Capturar) para ver el diff. Inyecciones del playbook:")
+        else:
+            for line in mutations.preview_dump(dump, config):
+                self.log_mut(line)
+        for line in mutations.planned_injections(config):
+            self.log_mut(line)
 
     # -- NDEF (emulación NFC) --------------------------------------------
     @on(Button.Pressed, "#fz_ndef_gen")
@@ -219,6 +259,19 @@ class FuzzScreen(Vertical):
         else:
             color = "blue"              # EMU:START, banners (#), etc.
         self.log(f"[{color}]← {line}[/]")
+
+    def log_mut(self, line: str):
+        # Diff del motor de mutaciones: flechas = cambio real, 'resp'/'cmd' =
+        # nota del motor, 'inyección'/'(' = informativo.
+        if "→" in line:
+            color = "green"
+        elif line.startswith(("resp", "cmd")):
+            color = "cyan"
+        elif line.startswith("inyección") or line.startswith("(") or "Sin captura" in line:
+            color = "yellow"
+        else:
+            color = "dim"
+        self.log(f"[{color}]{line}[/]")
 
     def log_write(self, op: str, resp) -> None:
         """Reusa el mismo callback que la pestaña Escritura (mismo worker)."""

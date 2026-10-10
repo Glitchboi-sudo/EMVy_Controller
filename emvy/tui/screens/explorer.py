@@ -22,9 +22,10 @@ from ...core import tlv
 from ...core.hexutil import from_hex
 from ...project import env as envmod
 from ...project import store
-from ..widgets.copyable import has_text_selection
+from ..widgets.copyable import CopyableDataTable, has_text_selection
 from ..widgets.tlvtree import add_tlvs, ascii_of
 from .console import ConsoleScreen
+from .intelrecs import IntelRecsScreen
 
 
 def _hexdata(tag, hexstr, suggest=None):
@@ -89,6 +90,11 @@ class ExplorerScreen(Vertical):
     ExplorerScreen .exp-chkrow { height: auto; }
     ExplorerScreen .exp-chkrow Checkbox { width: auto; margin: 0 2 0 0; }
 
+    /* Sección INTEL: tabla compacta + botón de recomendaciones */
+    ExplorerScreen #exp_intel_table { height: auto; max-height: 10; }
+    ExplorerScreen .exp-intelrow { height: auto; padding: 1 0 0 0; }
+    ExplorerScreen .exp-intelrow Button { min-width: 16; }
+
     /* Consola embebida al pie */
     ExplorerScreen #exp_console_box { height: auto; margin: 1 0 0 0; }
     ExplorerScreen #screen-console { height: auto; }
@@ -109,7 +115,10 @@ class ExplorerScreen(Vertical):
         with Horizontal(id="exp-main"):
             yield Tree("tarjeta", id="exp_tree")
             with VerticalScroll(id="exp_sidebar"):
-                yield Static("NODO SELECCIONADO", classes="exp-label-first")
+                yield Static("IDENTIDAD DE TARJETA", classes="exp-label-first")
+                yield Static("[dim]Sin captura.[/]", id="exp_identity")
+
+                yield Static("NODO SELECCIONADO", classes="exp-label")
                 yield Label("[dim]Selecciona un nodo del árbol para copiar o "
                             "asignar su valor.[/]", id="exp_detail")
                 with Horizontal(classes="exp-copyrow"):
@@ -137,12 +146,18 @@ class ExplorerScreen(Vertical):
                                 id="exp_savename")
                     yield Button("Guardar", id="exp_save", variant="warning")
 
+                yield Static("INTEL", classes="exp-label")
+                yield CopyableDataTable(id="exp_intel_table")
+                with Horizontal(classes="exp-intelrow"):
+                    yield Button("Recomendaciones", id="exp_intel_recs")
+
         with Collapsible(title="Consola en vivo (APDU + transporte del lector)",
                          collapsed=True, id="exp_console_box"):
             yield ConsoleScreen(id="screen-console")
 
     def on_mount(self):
         self._sel: dict | None = None
+        self._profile = None          # CardProfile de la última captura mostrada
         tree = self.query_one("#exp_tree", Tree)
         tree.border_title = "Árbol TLV"
         tree.show_root = True
@@ -150,6 +165,9 @@ class ExplorerScreen(Vertical):
             self.query_one("#exp_sidebar").border_title = "Inspector"
         except Exception:
             pass
+        table = self.query_one("#exp_intel_table", CopyableDataTable)
+        table.add_columns("hash", "esquema", "veces", "última")
+        table.border_title = "Tarjetas del proyecto"
         self._empty_tree()
         self.reload()
 
@@ -161,7 +179,7 @@ class ExplorerScreen(Vertical):
         tree.root.expand()
 
     def reload(self):
-        """Repuebla los destinos de guardado (proyectos + archivo)."""
+        """Repuebla los destinos de guardado (proyectos + archivo) y la tabla INTEL."""
         opts = [("→ proyecto activo", "active")]
         for p in store.list_projects():
             opts.append((f"→ proyecto: {p.name}", f"proj:{p.name}"))
@@ -172,6 +190,83 @@ class ExplorerScreen(Vertical):
             self.query_one("#exp_dest", Select).set_options(opts)
         except Exception:
             pass
+        self._reload_intel_table()
+
+    # -- intel: identidad de tarjeta + tabla del proyecto --------------------
+    def _reload_intel_table(self):
+        """Tarjetas conocidas del proyecto en la tabla INTEL (defensivo: la DB
+        es local y pequeña; ante cualquier error se muestra un mensaje honesto)."""
+        table = self.query_one("#exp_intel_table", CopyableDataTable)
+        table.clear()
+        proj = store.active_project()
+        if not proj:
+            return
+        try:
+            from ...project.inteldb import IntelDB
+            with IntelDB(proj) as db:
+                rows = db.list_cards()
+        except Exception:
+            return
+        for r in rows:
+            table.add_row(r.hash[:12], r.profile.scheme or "?",
+                          str(r.times_seen),
+                          datetime.fromtimestamp(r.last_seen).strftime("%Y-%m-%d"))
+
+    def _update_identity(self, dump):
+        """Calcula el fingerprint de la captura y lo muestra en el inspector;
+        con proyecto activo registra la tarjeta (vista N veces) en la intel DB."""
+        from ...core import fingerprint
+        label = self.query_one("#exp_identity", Static)
+        try:
+            profile = fingerprint.profile_from_dump(dump)
+        except Exception:
+            profile = None
+        self._profile = profile
+        if profile is None:
+            label.update("[dim]Captura sin datos de aplicación: sin identidad.[/]")
+            return
+        proj = store.active_project()
+        if not proj:
+            label.update(f"[b cyan]{profile.hash[:16]}[/]…\n"
+                         "[dim]Sin proyecto activo: no se consulta la intel DB.[/]")
+            return
+        try:
+            from ...project.inteldb import IntelDB
+            with IntelDB(proj) as db:
+                row = db.upsert_card(profile)
+        except Exception:
+            label.update(f"[b cyan]{profile.hash[:16]}[/]…\n"
+                         "[dim]No se pudo consultar la intel DB.[/]")
+            return
+        veces = "vez" if row.times_seen == 1 else "veces"
+        nota = f"\n[dim]{row.notes[:64]}[/]" if row.notes else ""
+        label.update(f"[b cyan]{profile.hash[:16]}[/]…  "
+                     f"[green]{profile.scheme or '?'}[/]\n"
+                     f"Vista {row.times_seen} {veces} en el proyecto · "
+                     f"última {datetime.fromtimestamp(row.last_seen):%Y-%m-%d %H:%M}{nota}")
+        self._reload_intel_table()
+
+    @on(Button.Pressed, "#exp_intel_recs")
+    def _intel_recs(self):
+        """Abre el modal de recomendaciones para el hash mostrado (si hay)."""
+        if self._profile is None:
+            self.app.notify("Captura una tarjeta primero (la identidad da el hash).",
+                            severity="warning")
+            return
+        proj = store.active_project()
+        if not proj:
+            self.app.notify("Sin proyecto activo: no hay intel DB que consultar.",
+                            severity="warning")
+            return
+        try:
+            from ...project.inteldb import IntelDB
+            with IntelDB(proj) as db:
+                recs = db.recommend_for(self._profile.hash)
+        except Exception as e:
+            self.app.notify(f"No se pudieron calcular recomendaciones: {e}",
+                            severity="error")
+            return
+        self.app.push_screen(IntelRecsScreen(self._profile.hash[:16], recs))
 
     # -- captura ------------------------------------------------------------
     # "Capturar tarjeta" siempre prueba EMV y, si no hay apps, cae a NFC
@@ -226,6 +321,8 @@ class ExplorerScreen(Vertical):
     def _clear(self):
         self._empty_tree()
         self._sel = None
+        self._profile = None
+        self.query_one("#exp_identity", Static).update("[dim]Sin captura.[/]")
         self.query_one("#exp_detail", Label).update(
             "[dim]Selecciona un nodo del árbol para copiar o asignar su valor.[/]")
 
@@ -389,6 +486,7 @@ class ExplorerScreen(Vertical):
 
     # -- poblado desde el hilo principal (lo llama la app) ------------------
     def show_dump(self, dump):
+        self._update_identity(dump)
         tree = self.query_one("#exp_tree", Tree)
         n = len(dump.applications)
         tree.reset(f"[b]tarjeta[/]  [dim]{n} app{'s' if n != 1 else ''} · "
