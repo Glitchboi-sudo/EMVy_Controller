@@ -810,7 +810,7 @@ def probe_card(device, amount_cents: int = 0, country: str = "0484",
         out["records"] = []
         if afl:
             for e in range(0, len(afl), 4):
-                sfi, r1, r2 = afl[e], afl[e + 1], afl[e + 2]
+                sfi, r1, r2 = afl[e] >> 3, afl[e + 1], afl[e + 2]
                 for rec in range(r1, r2 + 1):
                     cmd = bytes([0x00, 0xB2, rec, (sfi << 3) | 4, 0x00])
                     rr = apdu(cmd, f"RECORD sfi={sfi} rec={rec}")

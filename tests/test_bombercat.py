@@ -289,6 +289,50 @@ def test_probe_card_follows_real_terminal_flow(fake_serial):
         assert out["records"]
 
 
+def test_probe_card_read_record_desempaqueta_sfi_del_afl(fake_serial):
+    """El primer byte de cada entrada del AFL es SFI<<3|4 (no el SFI pelado):
+    hay que desempaquetarlo con >>3. Usando el byte crudo como SFI, probe_card
+    mandaba READ RECORD con P2=0x44 en vez de 0x0C y la tarjeta contestaba
+    6A82 — bug real detectado al portar probe-card a bombercat-tools."""
+    import serial as serial_mod
+    from emvy.core import apdu, tlv
+    from emvy.core.hexutil import from_hex
+    from emvy.readers import bombercat
+    from fakecard import build_fake_card
+
+    base_send, _ = build_fake_card()
+    rec = tlv.encode_tlv(tlv.TLV("70", b"", [
+        tlv.tlv("5A", from_hex("4761739001010010")),
+    ], constructed=True))
+    gpo = tlv.encode_tlv(tlv.TLV("77", b"", [
+        tlv.tlv("82", from_hex("2000")),
+        tlv.tlv("94", from_hex("08010100")),  # SFI 1 (byte 0x08), registros 1-1
+    ], constructed=True))
+
+    def afl_card(a):
+        b = a.to_bytes() if isinstance(a, apdu.APDU) else bytes(a)
+        if b.startswith(b"\x80\xA8\x00\x00"):
+            return apdu.Response(gpo, 0x90, 0x00)
+        if b.startswith(b"\x00\xB2"):
+            if b[3] == ((1 << 3) | 4) and b[2] == 1:  # solo SFI 1, registro 1
+                return apdu.Response(rec, 0x90, 0x00)
+            return apdu.Response(b"", 0x6A, 0x82)
+        return base_send(a)
+
+    class AflSerial(fakeserial.FakeSerial):
+        def __init__(self, *args, **kw):
+            super().__init__(*args, **kw)
+            self._card = afl_card
+
+    serial_mod.Serial = AflSerial
+    out = bombercat.probe_card(bombercat.list_devices()[0], wait_s=1)
+    assert out["afl"] == "08010100"
+    assert out["records"], "el AFL anuncia el registro 1 — debe leerse"
+    cmd, resp = out["records"][0]
+    assert cmd == "00B2010C00", f"P2 mal construido: {cmd}"
+    assert resp.endswith("9000")
+
+
 def test_cli_bombercat_cardscan(fake_serial, capsys):
     from emvy.cli import main
     rc = main(["bombercat", "cardscan"])
